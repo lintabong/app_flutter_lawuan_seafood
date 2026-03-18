@@ -1,9 +1,13 @@
+
 import 'package:flutter/material.dart';
-import 'product_page.dart';
-import 'order_page.dart';
-import 'transaction_page.dart';
-import 'delivery_order_page.dart';
 import 'create_order_page.dart';
+import 'customers_page.dart';
+import 'delivery_order_page.dart';
+import 'order_page.dart';
+import 'product_page.dart';
+import 'purchase_product.dart';
+import 'transaction_page.dart';
+
 
 class MainMenu extends StatelessWidget {
     final List<Map<String, dynamic>> menus = [
@@ -38,7 +42,7 @@ class MainMenu extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              "Dashboard",
+                              'Dashboard',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 28,
@@ -48,7 +52,7 @@ class MainMenu extends StatelessWidget {
                             ),
                             SizedBox(height: 4),
                             Text(
-                              "What would you like to do?",
+                              'What?',
                               style: TextStyle(
                                 color: Color(0xFF64748B),
                                 fontSize: 14,
@@ -91,17 +95,17 @@ class MainMenu extends StatelessWidget {
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceAround,
                         children: [
-                          _buildStat("Orders", "128"),
+                          _buildStat('Orders', '128'),
                           _buildDivider(),
-                          _buildStat("Revenue", "Rp 4.2M"),
+                          _buildStat('Revenue', "Rp 4.2M"),
                           _buildDivider(),
-                          _buildStat("Products", "54"),
+                          _buildStat('Products', "54"),
                         ],
                       ),
                     ),
                     SizedBox(height: 28),
                     Text(
-                      "Menu",
+                      'Menu',
                       style: TextStyle(
                         color: Color(0xFF94A3B8),
                         fontSize: 12,
@@ -179,17 +183,21 @@ class _MenuCardState extends State<_MenuCard> with SingleTickerProviderStateMixi
   bool _pressed = false;
 
   void _navigate(BuildContext context) {
-    final title = widget.menu["title"];
-    if (title == "Products") {
+    final title = widget.menu['title'];
+    if (title == 'Products') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => ProductPage()));
-    } else if (title == "Orders") {
+    } else if (title == 'Orders') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => OrderPage()));
-    } else if (title == "Transaction") {
+    } else if (title == 'Transaction') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => TransactionPage()));
-    } else if (title == "Delivery Orders") {
+    } else if (title == 'Delivery Orders') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => DeliveryOrderPage()));
-    } else if (title == "Create Order") {
+    } else if (title == 'Create Order') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => CreateOrderPage()));
+    } else if (title == 'Purchasing') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => ProductPurchasePage()));
+    } else if (title == 'Customers') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => CustomerPage()));
     }
   }
 

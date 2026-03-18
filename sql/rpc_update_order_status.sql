@@ -16,13 +16,11 @@ declare
     v_total numeric;
     v_transaction_id bigint;
     v_cash_balance numeric;
+    v_order_date timestamptz;
 begin
 
-    -- =========================
-    -- LOCK ORDER
-    -- =========================
-    select status, total_amount
-    into v_old_status, v_total
+    select status, total_amount, order_date
+    into v_old_status, v_total, v_order_date
     from orders
     where id = p_order_id
     for update;
@@ -36,19 +34,14 @@ begin
         return;
     end if;
 
-    -- =========================
-    -- PREVENT INVALID REVERT
-    -- =========================
-    if v_old_status in ('paid','picked up','delivered')
-    and p_new_status in ('pending','prepared') then
+    if v_old_status in ('paid', 'picked up', 'delivered')
+    and p_new_status in ('pending', 'prepared') then
         raise exception 'Cannot revert paid order to non financial state';
     end if;
 
-    ------------------------------------------------
     -- PAYMENT EVENT
-    ------------------------------------------------
-    if v_old_status in ('pending','prepared')
-    and p_new_status in ('paid','picked up','delivered') then
+    if v_old_status in ('pending', 'prepared')
+    and p_new_status in ('paid', 'picked up' ,'delivered') then
 
         -- Prevent duplicate financial entry
         if exists(
@@ -75,7 +68,8 @@ begin
             reference_type,
             reference_id,
             amount,
-            created_by
+            created_by,
+            transaction_date
         )
         values(
             'sale',
@@ -83,7 +77,8 @@ begin
             'order',
             p_order_id,
             v_total,
-            p_user
+            p_user,
+            v_order_date
         )
         returning id into v_transaction_id;
 
@@ -99,11 +94,8 @@ begin
 
     end if;
 
-    ------------------------------------------------
     -- CANCEL PAID ORDER
-    ------------------------------------------------
-    if v_old_status in ('paid','picked up','delivered')
-    and p_new_status = 'cancelled' then
+    if v_old_status in ('paid','picked up','delivered') and p_new_status = 'cancelled' then
 
         select id
         into v_transaction_id
@@ -141,9 +133,7 @@ begin
 
     end if;
 
-    ------------------------------------------------
     -- UPDATE STATUS
-    ------------------------------------------------
     update orders
     set status = p_new_status
     where id = p_order_id;

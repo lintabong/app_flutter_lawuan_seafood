@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../services/supabase_service.dart';
 
 class CreateOrderPage extends StatefulWidget {
@@ -23,11 +24,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   /// Order date/time — defaults to now, user can override
   DateTime _orderDate = DateTime.now();
 
-  final TextEditingController _deliveryPriceController = TextEditingController(text: '0');
+  final TextEditingController _deliveryPriceController =
+      TextEditingController(text: '0');
   final TextEditingController _customerSearchCtrl = TextEditingController();
 
-  /// Each entry: { product, variant, qty }
+  /// Each entry: { product, variant, qty, sell_price }
   /// qty is stored as double to support 0.01 steps
+  /// sell_price is editable per-item, seeded from variant['sell_price']
   final List<Map<String, dynamic>> _orderItems = [];
 
   bool _submitting = false;
@@ -63,7 +66,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   Future<List<dynamic>> _getCashes() async {
     try {
-      final response = await supabase.from('cash').select('id, name, balance').order('name');
+      final response =
+          await supabase.from('cash').select('id, name, balance').order('name');
       return response;
     } catch (_) {
       return [];
@@ -72,7 +76,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   // ── Computed ──────────────────────────────────────────────
   double get _itemsTotal => _orderItems.fold(0, (sum, item) {
-        final price = _variantSellPrice(item['variant']);
+        final price =
+            double.tryParse(item['sell_price']?.toString() ?? '0') ?? 0;
         return sum + price * (item['qty'] as double);
       });
 
@@ -94,7 +99,6 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
     return buffer.toString();
   }
 
-  /// Formats a DateTime for display (local time label + UTC note)
   String _formatOrderDate(DateTime dt) {
     final pad = (int n) => n.toString().padLeft(2, '0');
     return '${dt.year}-${pad(dt.month)}-${pad(dt.day)}  '
@@ -116,8 +120,10 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
         'product_id': product['id'],
         'variant_id': variant['id'],
         'qty': item['qty'] as double,
-        'buy_price': double.tryParse(variant['buy_price']?.toString() ?? '0') ?? 0,
-        'sell_price': _variantSellPrice(variant),
+        'buy_price':
+            double.tryParse(variant['buy_price']?.toString() ?? '0') ?? 0,
+        'sell_price':
+            double.tryParse(item['sell_price']?.toString() ?? '0') ?? 0,
       };
     }).toList();
   }
@@ -161,7 +167,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
         ),
         dialogBackgroundColor: const Color(0xFF161B27),
         textButtonTheme: TextButtonThemeData(
-          style: TextButton.styleFrom(foregroundColor: const Color(0xFF6C63FF)),
+          style:
+              TextButton.styleFrom(foregroundColor: const Color(0xFF6C63FF)),
         ),
       ),
       child: child!,
@@ -182,9 +189,16 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
               (i) => i['variant']['id'] == variant['id'],
             );
             if (idx >= 0) {
-              _orderItems[idx]['qty'] = (_orderItems[idx]['qty'] as double) + qty;
+              _orderItems[idx]['qty'] =
+                  (_orderItems[idx]['qty'] as double) + qty;
             } else {
-              _orderItems.add({'product': product, 'variant': variant, 'qty': qty});
+              _orderItems.add({
+                'product': product,
+                'variant': variant,
+                'qty': qty,
+                // seed editable sell_price from the variant
+                'sell_price': _variantSellPrice(variant),
+              });
             }
           });
         },
@@ -227,7 +241,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
         items: _buildItems(),
         deliveryPrice: _deliveryPrice,
         deliveryType: _deliveryType,
-        orderDate: _orderDate, // passed as local; service converts to UTC
+        orderDate: _orderDate,
       );
 
       if (mounted) {
@@ -244,7 +258,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   void _snack(String msg, {bool success = false}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg, style: const TextStyle(color: Colors.white)),
-      backgroundColor: success ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+      backgroundColor:
+          success ? const Color(0xFF10B981) : const Color(0xFFEF4444),
       behavior: SnackBarBehavior.floating,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       margin: const EdgeInsets.all(16),
@@ -278,7 +293,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                           const SizedBox(height: 20),
                           _buildCashSection(),
                           const SizedBox(height: 20),
-                          _buildOrderDateSection(), // ← new
+                          _buildOrderDateSection(),
                           const SizedBox(height: 20),
                           _buildDeliverySection(),
                           const SizedBox(height: 20),
@@ -313,9 +328,11 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
               decoration: BoxDecoration(
                 color: const Color(0xFF1E2333),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF2A3040), width: 1),
+                border:
+                    Border.all(color: const Color(0xFF2A3040), width: 1),
               ),
-              child: const Icon(Icons.arrow_back_rounded, color: Color(0xFF94A3B8), size: 20),
+              child: const Icon(Icons.arrow_back_rounded,
+                  color: Color(0xFF94A3B8), size: 20),
             ),
           ),
           const SizedBox(width: 16),
@@ -334,7 +351,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                 ),
                 Text(
                   "Fill in the order details",
-                  style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
+                  style:
+                      TextStyle(color: Color(0xFF64748B), fontSize: 13),
                 ),
               ],
             ),
@@ -387,14 +405,16 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                     color: const Color(0xFF1E1B4B),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.person_rounded, color: Color(0xFF6C63FF), size: 20),
+                  child: const Icon(Icons.person_rounded,
+                      color: Color(0xFF6C63FF), size: 20),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: _selectedCustomer == null
                       ? const Text(
                           'Select customer...',
-                          style: TextStyle(color: Color(0xFF4A5568), fontSize: 14),
+                          style: TextStyle(
+                              color: Color(0xFF4A5568), fontSize: 14),
                         )
                       : Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -410,12 +430,15 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                             if (_selectedCustomer!['phone'] != null)
                               Text(
                                 _selectedCustomer!['phone'],
-                                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                                style: const TextStyle(
+                                    color: Color(0xFF64748B),
+                                    fontSize: 12),
                               ),
                           ],
                         ),
                 ),
-                const Icon(Icons.chevron_right_rounded, color: Color(0xFF2A3040), size: 22),
+                const Icon(Icons.chevron_right_rounded,
+                    color: Color(0xFF2A3040), size: 22),
               ],
             ),
           ),
@@ -442,10 +465,14 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
               value: _selectedCash,
               isExpanded: true,
               dropdownColor: const Color(0xFF1E2333),
-              icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF4A5568)),
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-              hint: const Text('Select cash...', style: TextStyle(color: Color(0xFF4A5568))),
-              items: _cashes.map<DropdownMenuItem<Map<String, dynamic>>>((c) {
+              icon: const Icon(Icons.keyboard_arrow_down_rounded,
+                  color: Color(0xFF4A5568)),
+              style:
+                  const TextStyle(color: Colors.white, fontSize: 14),
+              hint: const Text('Select cash...',
+                  style: TextStyle(color: Color(0xFF4A5568))),
+              items:
+                  _cashes.map<DropdownMenuItem<Map<String, dynamic>>>((c) {
                 return DropdownMenuItem(
                   value: c as Map<String, dynamic>,
                   child: Row(
@@ -457,7 +484,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                       const Spacer(),
                       Text(
                         'Rp ${_formatPrice(double.tryParse(c['balance']?.toString() ?? '0') ?? 0)}',
-                        style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                        style: const TextStyle(
+                            color: Color(0xFF64748B), fontSize: 12),
                       ),
                     ],
                   ),
@@ -484,7 +512,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             decoration: BoxDecoration(
               color: const Color(0xFF161B27),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFF222840), width: 1),
+              border:
+                  Border.all(color: const Color(0xFF222840), width: 1),
             ),
             child: Row(
               children: [
@@ -541,22 +570,23 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
           decoration: BoxDecoration(
             color: const Color(0xFF161B27),
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFF222840), width: 1),
+            border:
+                Border.all(color: const Color(0xFF222840), width: 1),
           ),
           child: Column(
             children: [
-              // Toggle
               Padding(
                 padding: const EdgeInsets.all(6),
                 child: Row(
                   children: [
-                    _deliveryToggle('pickup', Icons.store_rounded, 'Pickup'),
+                    _deliveryToggle(
+                        'pickup', Icons.store_rounded, 'Pickup'),
                     const SizedBox(width: 6),
-                    _deliveryToggle('delivery', Icons.delivery_dining_rounded, 'Delivery'),
+                    _deliveryToggle('delivery',
+                        Icons.delivery_dining_rounded, 'Delivery'),
                   ],
                 ),
               ),
-              // Delivery price (only when delivery)
               if (_deliveryType == 'delivery')
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -564,7 +594,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                     children: [
                       const Text(
                         'Delivery fee',
-                        style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+                        style: TextStyle(
+                            color: Color(0xFF94A3B8), fontSize: 13),
                       ),
                       const Spacer(),
                       SizedBox(
@@ -574,17 +605,21 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                           keyboardType: TextInputType.number,
                           textAlign: TextAlign.right,
                           style: const TextStyle(
-                              color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700),
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700),
                           decoration: const InputDecoration(
                             prefixText: 'Rp ',
-                            prefixStyle: TextStyle(color: Color(0xFF64748B), fontSize: 13),
+                            prefixStyle: TextStyle(
+                                color: Color(0xFF64748B),
+                                fontSize: 13),
                             border: InputBorder.none,
                             isDense: true,
                           ),
                           onChanged: (v) {
-                            setState(() {
-                              _deliveryPrice = double.tryParse(v) ?? 0;
-                            });
+                            setState(
+                                () => _deliveryPrice =
+                                    double.tryParse(v) ?? 0);
                           },
                         ),
                       ),
@@ -613,24 +648,34 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
-            color: active ? const Color(0xFF1E1B4B) : Colors.transparent,
+            color: active
+                ? const Color(0xFF1E1B4B)
+                : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: active ? const Color(0xFF6C63FF).withOpacity(0.5) : Colors.transparent,
+              color: active
+                  ? const Color(0xFF6C63FF).withOpacity(0.5)
+                  : Colors.transparent,
             ),
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(icon,
-                  size: 16, color: active ? const Color(0xFF6C63FF) : const Color(0xFF4A5568)),
+                  size: 16,
+                  color: active
+                      ? const Color(0xFF6C63FF)
+                      : const Color(0xFF4A5568)),
               const SizedBox(width: 6),
               Text(
                 label,
                 style: TextStyle(
-                  color: active ? const Color(0xFF6C63FF) : const Color(0xFF4A5568),
+                  color: active
+                      ? const Color(0xFF6C63FF)
+                      : const Color(0xFF4A5568),
                   fontSize: 13,
-                  fontWeight: active ? FontWeight.w700 : FontWeight.normal,
+                  fontWeight:
+                      active ? FontWeight.w700 : FontWeight.normal,
                 ),
               ),
             ],
@@ -642,7 +687,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   // ── Status ────────────────────────────────────────────────
   Widget _buildStatusSection() {
-    const statuses = ['pending', 'prepared', 'paid', 'picked up', 'delivered'];
+    const statuses = [
+      'pending',
+      'prepared',
+      'paid',
+      'picked up',
+      'delivered'
+    ];
     const colors = {
       'pending': Color(0xFFF59E0B),
       'prepared': Color(0xFF6C63FF),
@@ -660,14 +711,16 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
           decoration: BoxDecoration(
             color: const Color(0xFF161B27),
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFF222840), width: 1),
+            border:
+                Border.all(color: const Color(0xFF222840), width: 1),
           ),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<String>(
               value: _status,
               isExpanded: true,
               dropdownColor: const Color(0xFF1E2333),
-              icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF4A5568)),
+              icon: const Icon(Icons.keyboard_arrow_down_rounded,
+                  color: Color(0xFF4A5568)),
               items: statuses.map((s) {
                 final color = colors[s] ?? const Color(0xFF94A3B8);
                 return DropdownMenuItem(
@@ -677,18 +730,23 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                       Container(
                         width: 8,
                         height: 8,
-                        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                        decoration: BoxDecoration(
+                            color: color, shape: BoxShape.circle),
                       ),
                       const SizedBox(width: 10),
                       Text(
                         s[0].toUpperCase() + s.substring(1),
-                        style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.w600),
+                        style: TextStyle(
+                            color: color,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
                 );
               }).toList(),
-              onChanged: (v) => setState(() => _status = v ?? 'pending'),
+              onChanged: (v) =>
+                  setState(() => _status = v ?? 'pending'),
             ),
           ),
         ),
@@ -707,19 +765,26 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             GestureDetector(
               onTap: _addProductSheet,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E1B4B),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.3)),
+                  border: Border.all(
+                      color:
+                          const Color(0xFF6C63FF).withOpacity(0.3)),
                 ),
                 child: const Row(
                   children: [
-                    Icon(Icons.add_rounded, color: Color(0xFF6C63FF), size: 16),
+                    Icon(Icons.add_rounded,
+                        color: Color(0xFF6C63FF), size: 16),
                     SizedBox(width: 4),
                     Text(
                       'Add Item',
-                      style: TextStyle(color: Color(0xFF6C63FF), fontSize: 12, fontWeight: FontWeight.w700),
+                      style: TextStyle(
+                          color: Color(0xFF6C63FF),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700),
                     ),
                   ],
                 ),
@@ -733,12 +798,14 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             decoration: BoxDecoration(
               color: const Color(0xFF161B27),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFF222840), width: 1),
+              border:
+                  Border.all(color: const Color(0xFF222840), width: 1),
             ),
             child: const Center(
               child: Text(
                 'No items added yet',
-                style: TextStyle(color: Color(0xFF4A5568), fontSize: 13),
+                style:
+                    TextStyle(color: Color(0xFF4A5568), fontSize: 13),
               ),
             ),
           )
@@ -748,9 +815,18 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             final product = item['product'] as Map<String, dynamic>;
             final variant = item['variant'] as Map<String, dynamic>;
             final qty = item['qty'] as double;
-            final price = _variantSellPrice(variant);
+            final sellPrice =
+                double.tryParse(item['sell_price']?.toString() ?? '0') ??
+                    0;
+            final subtotal = sellPrice * qty;
+
             final qtyCtrl = TextEditingController(
-              text: qty % 1 == 0 ? qty.toInt().toString() : qty.toStringAsFixed(2),
+              text: qty % 1 == 0
+                  ? qty.toInt().toString()
+                  : qty.toStringAsFixed(2),
+            );
+            final priceCtrl = TextEditingController(
+              text: sellPrice > 0 ? sellPrice.toInt().toString() : '',
             );
 
             return Container(
@@ -759,96 +835,219 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
               decoration: BoxDecoration(
                 color: const Color(0xFF161B27),
                 borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFF222840), width: 1),
+                border: Border.all(
+                    color: const Color(0xFF222840), width: 1),
               ),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1E1B4B),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.inventory_2_rounded,
-                        color: Color(0xFF6C63FF), size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          product['name'] ?? '-',
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700),
-                        ),
-                        Text(
-                          variant['name'] ?? '-',
-                          style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                  // Qty stepper with text input
+                  // ── Product / variant name row ──────────
                   Row(
                     children: [
-                      _qtyBtn(Icons.remove_rounded, () {
-                        setState(() {
-                          final newQty = double.parse(
-                            ((qty - 0.01) < 0.01 ? 0.01 : qty - 0.01)
-                                .toStringAsFixed(2),
-                          );
-                          if (qty <= 0.01) {
-                            _orderItems.removeAt(i);
-                          } else {
-                            _orderItems[i]['qty'] = newQty;
-                          }
-                        });
-                      }),
-                      SizedBox(
-                        width: 52,
-                        child: TextField(
-                          controller: qtyCtrl,
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 14, fontWeight: FontWeight.w800),
-                          decoration: const InputDecoration(
-                            border: InputBorder.none,
-                            isDense: true,
-                            contentPadding: EdgeInsets.symmetric(vertical: 4),
-                          ),
-                          onChanged: (v) {
-                            final parsed = double.tryParse(v);
-                            if (parsed != null && parsed > 0) {
-                              setState(() => _orderItems[i]['qty'] =
-                                  double.parse(parsed.toStringAsFixed(2)));
-                            }
-                          },
-                          onSubmitted: (v) {
-                            final parsed = double.tryParse(v);
-                            if (parsed == null || parsed <= 0) {
-                              setState(() => _orderItems.removeAt(i));
-                            }
-                          },
+                      Container(
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E1B4B),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                            Icons.inventory_2_rounded,
+                            color: Color(0xFF6C63FF),
+                            size: 20),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              product['name'] ?? '-',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700),
+                            ),
+                            Text(
+                              variant['name'] ?? '-',
+                              style: const TextStyle(
+                                  color: Color(0xFF64748B),
+                                  fontSize: 12),
+                            ),
+                          ],
                         ),
                       ),
-                      _qtyBtn(Icons.add_rounded, () {
-                        setState(() => _orderItems[i]['qty'] = double.parse(
-                              (qty + 0.01).toStringAsFixed(2),
-                            ));
-                      }),
+                      GestureDetector(
+                        onTap: () =>
+                            setState(() => _orderItems.removeAt(i)),
+                        child: Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFEF4444)
+                                .withOpacity(0.1),
+                            borderRadius:
+                                BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.close_rounded,
+                              color: Color(0xFFEF4444), size: 14),
+                        ),
+                      ),
                     ],
                   ),
-                  const SizedBox(width: 12),
-                  Text(
-                    'Rp ${_formatPrice(price * qty)}',
-                    style: const TextStyle(
-                      color: Color(0xFF10B981),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800,
-                    ),
+                  const SizedBox(height: 12),
+
+                  // ── Qty stepper + sell price input ──────
+                  Row(
+                    children: [
+                      // Qty stepper
+                      Row(
+                        children: [
+                          _qtyBtn(Icons.remove_rounded, () {
+                            setState(() {
+                              final newQty = double.parse(
+                                ((qty - 0.01) < 0.01
+                                        ? 0.01
+                                        : qty - 0.01)
+                                    .toStringAsFixed(2),
+                              );
+                              if (qty <= 0.01) {
+                                _orderItems.removeAt(i);
+                              } else {
+                                _orderItems[i]['qty'] = newQty;
+                              }
+                            });
+                          }),
+                          SizedBox(
+                            width: 52,
+                            child: TextField(
+                              controller: qtyCtrl,
+                              keyboardType: const TextInputType
+                                  .numberWithOptions(decimal: true),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800),
+                              decoration: const InputDecoration(
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding:
+                                    EdgeInsets.symmetric(vertical: 4),
+                              ),
+                              onChanged: (v) {
+                                final parsed = double.tryParse(v);
+                                if (parsed != null && parsed > 0) {
+                                  setState(() =>
+                                      _orderItems[i]['qty'] =
+                                          double.parse(parsed
+                                              .toStringAsFixed(2)));
+                                }
+                              },
+                              onSubmitted: (v) {
+                                final parsed = double.tryParse(v);
+                                if (parsed == null || parsed <= 0) {
+                                  setState(() =>
+                                      _orderItems.removeAt(i));
+                                }
+                              },
+                            ),
+                          ),
+                          _qtyBtn(Icons.add_rounded, () {
+                            setState(() =>
+                                _orderItems[i]['qty'] = double.parse(
+                                    (qty + 0.01).toStringAsFixed(2)));
+                          }),
+                        ],
+                      ),
+                      const SizedBox(width: 12),
+
+                      // ── Sell price input ─────────────────
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0F1117),
+                            borderRadius:
+                                BorderRadius.circular(10),
+                            border: Border.all(
+                                color: const Color(0xFF222840),
+                                width: 1),
+                          ),
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Sell Price',
+                                style: TextStyle(
+                                    color: Color(0xFF4A5568),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w500),
+                              ),
+                              const SizedBox(height: 2),
+                              Row(
+                                children: [
+                                  const Text('Rp ',
+                                      style: TextStyle(
+                                          color: Color(0xFF64748B),
+                                          fontSize: 13)),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: priceCtrl,
+                                      keyboardType:
+                                          TextInputType.number,
+                                      inputFormatters: [
+                                        FilteringTextInputFormatter
+                                            .digitsOnly
+                                      ],
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 13),
+                                      decoration:
+                                          const InputDecoration(
+                                        hintText: '0',
+                                        hintStyle: TextStyle(
+                                            color:
+                                                Color(0xFF2A3040),
+                                            fontSize: 13),
+                                        border: InputBorder.none,
+                                        isDense: true,
+                                        contentPadding:
+                                            EdgeInsets.zero,
+                                      ),
+                                      onChanged: (v) {
+                                        setState(() =>
+                                            _orderItems[i]
+                                                ['sell_price'] =
+                                                double.tryParse(
+                                                        v) ??
+                                                    0);
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      // ── Subtotal ─────────────────────────
+                      if (subtotal > 0) ...[
+                        const SizedBox(width: 12),
+                        Text(
+                          'Rp ${_formatPrice(subtotal)}',
+                          style: const TextStyle(
+                            color: Color(0xFF10B981),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ],
               ),
@@ -882,11 +1081,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       ),
       child: Column(
         children: [
-          _summaryRow('Items total', 'Rp ${_formatPrice(_itemsTotal)}', Colors.white),
+          _summaryRow('Items total',
+              'Rp ${_formatPrice(_itemsTotal)}', Colors.white),
           if (_deliveryType == 'delivery') ...[
             const SizedBox(height: 8),
-            _summaryRow(
-                'Delivery fee', 'Rp ${_formatPrice(_deliveryPrice)}', const Color(0xFF64748B)),
+            _summaryRow('Delivery fee',
+                'Rp ${_formatPrice(_deliveryPrice)}',
+                const Color(0xFF64748B)),
           ],
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 10),
@@ -903,14 +1104,19 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
     );
   }
 
-  Widget _summaryRow(String label, String value, Color valueColor, {bool bold = false}) => Row(
+  Widget _summaryRow(String label, String value, Color valueColor,
+          {bool bold = false}) =>
+      Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label,
               style: TextStyle(
-                color: bold ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                color: bold
+                    ? const Color(0xFF94A3B8)
+                    : const Color(0xFF64748B),
                 fontSize: bold ? 14 : 13,
-                fontWeight: bold ? FontWeight.w700 : FontWeight.normal,
+                fontWeight:
+                    bold ? FontWeight.w700 : FontWeight.normal,
               )),
           Text(value,
               style: TextStyle(
@@ -973,7 +1179,10 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 // ═══════════════════════════════════════════════════════════════════════════════
 class _ProductPickerSheet extends StatefulWidget {
   final List products;
-  final void Function(Map<String, dynamic> product, Map<String, dynamic> variant, double qty) onAdd;
+  final void Function(
+      Map<String, dynamic> product,
+      Map<String, dynamic> variant,
+      double qty) onAdd;
 
   const _ProductPickerSheet({required this.products, required this.onAdd});
 
@@ -987,13 +1196,16 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
   Map<String, dynamic>? _selectedVariant;
   double _qty = 1.0;
   final TextEditingController _searchCtrl = TextEditingController();
-  late final TextEditingController _qtyCtrl = TextEditingController(text: '1');
+  late final TextEditingController _qtyCtrl =
+      TextEditingController(text: '1');
 
   List get _filtered => _search.isEmpty
       ? widget.products
       : widget.products
-          .where((p) =>
-              p['name'].toString().toLowerCase().contains(_search.toLowerCase()))
+          .where((p) => p['name']
+              .toString()
+              .toLowerCase()
+              .contains(_search.toLowerCase()))
           .toList();
 
   List<Map<String, dynamic>> get _variants {
@@ -1019,11 +1231,11 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
       builder: (_, scrollCtrl) => Container(
         decoration: const BoxDecoration(
           color: Color(0xFF161B27),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
           children: [
-            // Handle
             Padding(
               padding: const EdgeInsets.only(top: 12, bottom: 8),
               child: Container(
@@ -1048,14 +1260,17 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                     ),
                   ),
                   const Spacer(),
-                  if (_selectedProduct != null && _selectedVariant != null)
+                  if (_selectedProduct != null &&
+                      _selectedVariant != null)
                     GestureDetector(
                       onTap: () {
-                        widget.onAdd(_selectedProduct!, _selectedVariant!, _qty);
+                        widget.onAdd(
+                            _selectedProduct!, _selectedVariant!, _qty);
                         Navigator.pop(context);
                       },
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
                         decoration: BoxDecoration(
                           color: const Color(0xFF6C63FF),
                           borderRadius: BorderRadius.circular(10),
@@ -1063,7 +1278,9 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                         child: Text(
                           'Add  ×${_qty % 1 == 0 ? _qty.toInt() : _qty.toStringAsFixed(2)}',
                           style: const TextStyle(
-                              color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13),
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13),
                         ),
                       ),
                     ),
@@ -1083,40 +1300,50 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                 child: TextField(
                   controller: _searchCtrl,
                   onChanged: (v) => setState(() => _search = v),
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 14),
                   decoration: const InputDecoration(
                     hintText: 'Search products...',
-                    hintStyle: TextStyle(color: Color(0xFF4A5568), fontSize: 13),
-                    prefixIcon: Icon(Icons.search_rounded, color: Color(0xFF4A5568), size: 18),
+                    hintStyle: TextStyle(
+                        color: Color(0xFF4A5568), fontSize: 13),
+                    prefixIcon: Icon(Icons.search_rounded,
+                        color: Color(0xFF4A5568), size: 18),
                     border: InputBorder.none,
-                    contentPadding: EdgeInsets.symmetric(vertical: 12),
+                    contentPadding:
+                        EdgeInsets.symmetric(vertical: 12),
                   ),
                 ),
               ),
             ),
 
-            // Product list OR variant picker
             Expanded(
               child: _selectedProduct == null
                   ? ListView.builder(
                       controller: scrollCtrl,
-                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                      padding:
+                          const EdgeInsets.fromLTRB(20, 0, 20, 20),
                       itemCount: _filtered.length,
                       itemBuilder: (_, i) {
-                        final p = _filtered[i] as Map<String, dynamic>;
+                        final p =
+                            _filtered[i] as Map<String, dynamic>;
                         return GestureDetector(
                           onTap: () => setState(() {
                             _selectedProduct = p;
                             final v = _variants;
-                            _selectedVariant = v.isNotEmpty ? v[0] : null;
+                            _selectedVariant =
+                                v.isNotEmpty ? v[0] : null;
                           }),
                           child: Container(
-                            margin: const EdgeInsets.only(bottom: 8),
+                            margin:
+                                const EdgeInsets.only(bottom: 8),
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
                               color: const Color(0xFF0F1117),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: const Color(0xFF222840)),
+                              borderRadius:
+                                  BorderRadius.circular(14),
+                              border: Border.all(
+                                  color:
+                                      const Color(0xFF222840)),
                             ),
                             child: Row(
                               children: [
@@ -1124,11 +1351,15 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                                   width: 38,
                                   height: 38,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF1E1B4B),
-                                    borderRadius: BorderRadius.circular(10),
+                                    color:
+                                        const Color(0xFF1E1B4B),
+                                    borderRadius:
+                                        BorderRadius.circular(10),
                                   ),
-                                  child: const Icon(Icons.inventory_2_rounded,
-                                      color: Color(0xFF6C63FF), size: 18),
+                                  child: const Icon(
+                                      Icons.inventory_2_rounded,
+                                      color: Color(0xFF6C63FF),
+                                      size: 18),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
@@ -1141,8 +1372,10 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                                     ),
                                   ),
                                 ),
-                                const Icon(Icons.chevron_right_rounded,
-                                    color: Color(0xFF2A3040), size: 20),
+                                const Icon(
+                                    Icons.chevron_right_rounded,
+                                    color: Color(0xFF2A3040),
+                                    size: 20),
                               ],
                             ),
                           ),
@@ -1162,7 +1395,6 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
       controller: ctrl,
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
       children: [
-        // Back to products
         GestureDetector(
           onTap: () => setState(() {
             _selectedProduct = null;
@@ -1170,27 +1402,35 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
           }),
           child: Row(
             children: [
-              const Icon(Icons.arrow_back_rounded, color: Color(0xFF6C63FF), size: 18),
+              const Icon(Icons.arrow_back_rounded,
+                  color: Color(0xFF6C63FF), size: 18),
               const SizedBox(width: 6),
               Text(
                 _selectedProduct!['name'] ?? '-',
                 style: const TextStyle(
-                    color: Color(0xFF6C63FF), fontSize: 14, fontWeight: FontWeight.w700),
+                    color: Color(0xFF6C63FF),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700),
               ),
             ],
           ),
         ),
         const SizedBox(height: 16),
 
-        // Variants
         const Text(
           'SELECT VARIANT',
-          style: TextStyle(color: Color(0xFF4A5568), fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+          style: TextStyle(
+              color: Color(0xFF4A5568),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8),
         ),
         const SizedBox(height: 8),
         ..._variants.map((v) {
           final selected = _selectedVariant?['id'] == v['id'];
-          final price = double.tryParse(v['sell_price']?.toString() ?? '0') ?? 0;
+          final price =
+              double.tryParse(v['sell_price']?.toString() ?? '0') ??
+                  0;
           return GestureDetector(
             onTap: () => setState(() => _selectedVariant = v),
             child: AnimatedContainer(
@@ -1198,7 +1438,9 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                color: selected ? const Color(0xFF1E1B4B) : const Color(0xFF0F1117),
+                color: selected
+                    ? const Color(0xFF1E1B4B)
+                    : const Color(0xFF0F1117),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
                   color: selected
@@ -1209,8 +1451,12 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
               child: Row(
                 children: [
                   Icon(
-                    selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
-                    color: selected ? const Color(0xFF6C63FF) : const Color(0xFF2A3040),
+                    selected
+                        ? Icons.radio_button_checked_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    color: selected
+                        ? const Color(0xFF6C63FF)
+                        : const Color(0xFF2A3040),
                     size: 18,
                   ),
                   const SizedBox(width: 10),
@@ -1218,7 +1464,9 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                     child: Text(
                       v['name'] ?? '-',
                       style: TextStyle(
-                        color: selected ? Colors.white : const Color(0xFF94A3B8),
+                        color: selected
+                            ? Colors.white
+                            : const Color(0xFF94A3B8),
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
@@ -1227,7 +1475,9 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
                   Text(
                     'Rp ${_formatPrice(price)}',
                     style: const TextStyle(
-                        color: Color(0xFF10B981), fontSize: 13, fontWeight: FontWeight.w800),
+                        color: Color(0xFF10B981),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800),
                   ),
                 ],
               ),
@@ -1235,11 +1485,14 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
           );
         }),
 
-        // Qty
         const SizedBox(height: 16),
         const Text(
           'QUANTITY',
-          style: TextStyle(color: Color(0xFF4A5568), fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+          style: TextStyle(
+              color: Color(0xFF4A5568),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8),
         ),
         const SizedBox(height: 8),
         Row(
@@ -1247,37 +1500,48 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
             _qtyBtn(Icons.remove_rounded, () {
               setState(() {
                 final newQty = double.parse(
-                  (_qty - 0.01 < 0.01 ? 0.01 : _qty - 0.01).toStringAsFixed(2),
+                  (_qty - 0.01 < 0.01 ? 0.01 : _qty - 0.01)
+                      .toStringAsFixed(2),
                 );
                 _qty = newQty;
-                _qtyCtrl.text = _qty % 1 == 0 ? _qty.toInt().toString() : _qty.toStringAsFixed(2);
+                _qtyCtrl.text = _qty % 1 == 0
+                    ? _qty.toInt().toString()
+                    : _qty.toStringAsFixed(2);
               });
             }),
             SizedBox(
               width: 64,
               child: TextField(
                 controller: _qtyCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
-                    color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900),
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900),
                 decoration: const InputDecoration(
                   border: InputBorder.none,
                   isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 4),
+                  contentPadding:
+                      EdgeInsets.symmetric(vertical: 4),
                 ),
                 onChanged: (v) {
                   final parsed = double.tryParse(v);
                   if (parsed != null && parsed > 0) {
-                    setState(() => _qty = double.parse(parsed.toStringAsFixed(2)));
+                    setState(() => _qty =
+                        double.parse(parsed.toStringAsFixed(2)));
                   }
                 },
               ),
             ),
             _qtyBtn(Icons.add_rounded, () {
               setState(() {
-                _qty = double.parse((_qty + 0.01).toStringAsFixed(2));
-                _qtyCtrl.text = _qty % 1 == 0 ? _qty.toInt().toString() : _qty.toStringAsFixed(2);
+                _qty = double.parse(
+                    (_qty + 0.01).toStringAsFixed(2));
+                _qtyCtrl.text = _qty % 1 == 0
+                    ? _qty.toInt().toString()
+                    : _qty.toStringAsFixed(2);
               });
             }),
           ],
@@ -1286,7 +1550,8 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
     );
   }
 
-  Widget _qtyBtn(IconData icon, VoidCallback onTap) => GestureDetector(
+  Widget _qtyBtn(IconData icon, VoidCallback onTap) =>
+      GestureDetector(
         onTap: onTap,
         child: Container(
           width: 36,
@@ -1295,7 +1560,8 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
             color: const Color(0xFF1E2333),
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Icon(icon, size: 18, color: const Color(0xFF94A3B8)),
+          child:
+              Icon(icon, size: 18, color: const Color(0xFF94A3B8)),
         ),
       );
 
@@ -1317,10 +1583,12 @@ class _CustomerPickerSheet extends StatefulWidget {
   final List customers;
   final void Function(Map<String, dynamic>) onSelect;
 
-  const _CustomerPickerSheet({required this.customers, required this.onSelect});
+  const _CustomerPickerSheet(
+      {required this.customers, required this.onSelect});
 
   @override
-  State<_CustomerPickerSheet> createState() => _CustomerPickerSheetState();
+  State<_CustomerPickerSheet> createState() =>
+      _CustomerPickerSheetState();
 }
 
 class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
@@ -1330,7 +1598,10 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
       ? widget.customers
       : widget.customers
           .where((c) =>
-              c['name'].toString().toLowerCase().contains(_search.toLowerCase()) ||
+              c['name']
+                  .toString()
+                  .toLowerCase()
+                  .contains(_search.toLowerCase()) ||
               (c['phone'] ?? '').toString().contains(_search))
           .toList();
 
@@ -1343,7 +1614,8 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
       builder: (_, ctrl) => Container(
         decoration: const BoxDecoration(
           color: Color(0xFF161B27),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
           children: [
@@ -1353,7 +1625,8 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
                 width: 40,
                 height: 4,
                 decoration: BoxDecoration(
-                    color: const Color(0xFF2A3040), borderRadius: BorderRadius.circular(2)),
+                    color: const Color(0xFF2A3040),
+                    borderRadius: BorderRadius.circular(2)),
               ),
             ),
             const Padding(
@@ -1363,7 +1636,9 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
                 child: Text(
                   'Select Customer',
                   style: TextStyle(
-                      color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800),
                 ),
               ),
             ),
@@ -1373,18 +1648,22 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
                 decoration: BoxDecoration(
                   color: const Color(0xFF0F1117),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFF222840)),
+                  border:
+                      Border.all(color: const Color(0xFF222840)),
                 ),
                 child: TextField(
                   onChanged: (v) => setState(() => _search = v),
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 14),
                   decoration: const InputDecoration(
                     hintText: 'Search name or phone...',
-                    hintStyle: TextStyle(color: Color(0xFF4A5568), fontSize: 13),
-                    prefixIcon:
-                        Icon(Icons.search_rounded, color: Color(0xFF4A5568), size: 18),
+                    hintStyle: TextStyle(
+                        color: Color(0xFF4A5568), fontSize: 13),
+                    prefixIcon: Icon(Icons.search_rounded,
+                        color: Color(0xFF4A5568), size: 18),
                     border: InputBorder.none,
-                    contentPadding: EdgeInsets.symmetric(vertical: 12),
+                    contentPadding:
+                        EdgeInsets.symmetric(vertical: 12),
                   ),
                 ),
               ),
@@ -1392,10 +1671,12 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
             Expanded(
               child: ListView.builder(
                 controller: ctrl,
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                padding:
+                    const EdgeInsets.fromLTRB(20, 0, 20, 20),
                 itemCount: _filtered.length,
                 itemBuilder: (_, i) {
-                  final c = _filtered[i] as Map<String, dynamic>;
+                  final c =
+                      _filtered[i] as Map<String, dynamic>;
                   return GestureDetector(
                     onTap: () {
                       widget.onSelect(c);
@@ -1406,8 +1687,10 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
                         color: const Color(0xFF0F1117),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: const Color(0xFF222840)),
+                        borderRadius:
+                            BorderRadius.circular(14),
+                        border: Border.all(
+                            color: const Color(0xFF222840)),
                       ),
                       child: Row(
                         children: [
@@ -1416,14 +1699,18 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
                             height: 38,
                             decoration: BoxDecoration(
                                 color: const Color(0xFF1E1B4B),
-                                borderRadius: BorderRadius.circular(10)),
-                            child: const Icon(Icons.person_rounded,
-                                color: Color(0xFF6C63FF), size: 18),
+                                borderRadius:
+                                    BorderRadius.circular(10)),
+                            child: const Icon(
+                                Icons.person_rounded,
+                                color: Color(0xFF6C63FF),
+                                size: 18),
                           ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
                               children: [
                                 Text(
                                   c['name'] ?? '-',
@@ -1437,13 +1724,17 @@ class _CustomerPickerSheetState extends State<_CustomerPickerSheet> {
                                   Text(
                                     c['phone'],
                                     style: const TextStyle(
-                                        color: Color(0xFF64748B), fontSize: 12),
+                                        color:
+                                            Color(0xFF64748B),
+                                        fontSize: 12),
                                   ),
                               ],
                             ),
                           ),
-                          const Icon(Icons.chevron_right_rounded,
-                              color: Color(0xFF2A3040), size: 20),
+                          const Icon(
+                              Icons.chevron_right_rounded,
+                              color: Color(0xFF2A3040),
+                              size: 20),
                         ],
                       ),
                     ),

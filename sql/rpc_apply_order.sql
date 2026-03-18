@@ -133,7 +133,8 @@ begin
             reference_type,
             reference_id,
             amount,
-            created_by
+            created_by,
+            transaction_date
         )
         values(
             'sale',
@@ -141,7 +142,8 @@ begin
             'order',
             v_order_id,
             v_total,
-            p_created_by
+            p_created_by,
+            p_order_date
         )
         returning id into v_transaction_id;
 

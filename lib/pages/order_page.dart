@@ -2,6 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/supabase_service.dart';
 
+import '../helpers/currency_utils.dart';
+import '../helpers/date_utils.dart' as AppDateUtils;
+import '../helpers/status_utils.dart';
+import '../helpers/text_utils.dart';
+import '../constants.dart';
+
 class OrderPage extends StatefulWidget {
   @override
   State<OrderPage> createState() => _OrderPageState();
@@ -10,92 +16,114 @@ class OrderPage extends StatefulWidget {
 class _OrderPageState extends State<OrderPage> {
   List orders = [];
   bool loading = true;
-  bool loadingMore = false;
 
   // Filters
-  DateTime? selectedDate;
+  DateTime? selectedDate;          // null = no date filter
   String? selectedStatus;
-  final List<String> statuses = ['pending', 'paid', 'prepared', 'picked up', 'delivered', 'cancelled'];
+  String _nameQuery = '';
+  final TextEditingController _nameController = TextEditingController();
 
   // Pagination
-  int currentPage = 1;
-  final int pageSize = 10;
-  bool hasMore = true;
-
+  int _page = 1;
+  static const int _pageSize = 10;
+  bool _hasMore = true;
+  bool _loadingMore = false;
   final ScrollController _scrollController = ScrollController();
 
-  static const Color _amber = Color(0xFFF59E0B);
-  static const Color _amberBg = Color(0xFF2D1F0A);
+  int? selectedOrderIndex;
+  final Set<int> _updatingItems  = {};
+  final Set<int> _updatingOrders = {};
+
+  static const Color _cyan   = AppColors.cyan;
+  static const Color _cyanBg = AppColors.cyanBg;
+  static const Color _amber  = AppColors.amber;
+
+  static const List<String> _statuses = [
+    'pending', 'prepared', 'paid', 'delivered', 'cancelled',
+  ];
+
+  bool _requiresRpc(String from, String to) {
+    const triggers = {'pending', 'prepared'};
+    const targets  = {'paid', 'delivered'};
+    return triggers.contains(from) && targets.contains(to);
+  }
 
   @override
   void initState() {
     super.initState();
-    _loadOrders(reset: true);
     _scrollController.addListener(_onScroll);
+    _load();
   }
 
   @override
   void dispose() {
     _scrollController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 100) {
-      if (!loadingMore && hasMore) _loadMore();
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
+      _loadMore();
     }
   }
 
-  Future _loadOrders({bool reset = false}) async {
-    if (reset) {
-      setState(() { loading = true; currentPage = 1; orders = []; hasMore = true; });
-    }
-
-    final data = await SupabaseService.getOrders(
-      page: 1,
-      pageSize: pageSize,
-      date: selectedDate,
-      status: selectedStatus,
-    );
-
+  // Full reload (page 1) — called when filters change
+  Future _load() async {
     setState(() {
-      orders = data;
+      loading = true;
+      selectedOrderIndex = null;
+      _page = 1;
+      _hasMore = true;
+      orders = [];
+    });
+    final data = await SupabaseService.getOrders(
+      page:     1,
+      pageSize: _pageSize,
+      date:     selectedDate,
+      status:   selectedStatus,
+      name:     _nameQuery.isNotEmpty ? _nameQuery : null,
+      withItems: true,
+    );
+    setState(() {
+      orders  = data;
       loading = false;
-      hasMore = data.length == pageSize;
+      _hasMore = data.length == _pageSize;
     });
   }
 
+  // Append next page
   Future _loadMore() async {
-    if (loadingMore || !hasMore) return;
-    setState(() => loadingMore = true);
-
-    final nextPage = currentPage + 1;
+    if (_loadingMore || !_hasMore) return;
+    setState(() => _loadingMore = true);
+    final nextPage = _page + 1;
     final data = await SupabaseService.getOrders(
-      page: nextPage,
-      pageSize: pageSize,
-      date: selectedDate,
-      status: selectedStatus,
+      page:     nextPage,
+      pageSize: _pageSize,
+      date:     selectedDate,
+      status:   selectedStatus,
+      name:     _nameQuery.isNotEmpty ? _nameQuery : null,
+      withItems: true,
     );
-
     setState(() {
+      _page       = nextPage;
+      _loadingMore = false;
+      _hasMore    = data.length == _pageSize;
       orders.addAll(data);
-      currentPage = nextPage;
-      hasMore = data.length == pageSize;
-      loadingMore = false;
     });
   }
 
   Future _pickDate(BuildContext context) async {
-    final now = DateTime.now();
     final picked = await showDatePicker(
       context: context,
-      initialDate: selectedDate ?? now,
+      initialDate: selectedDate ?? DateTime.now(),
       firstDate: DateTime(2020),
-      lastDate: now,
-      builder: (context, child) => Theme(
-        data: Theme.of(context).copyWith(
+      lastDate: DateTime.now(),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
           colorScheme: ColorScheme.dark(
-            primary: _amber,
+            primary: _cyan,
             surface: Color(0xFF161B27),
             onSurface: Colors.white,
           ),
@@ -106,33 +134,163 @@ class _OrderPageState extends State<OrderPage> {
     );
     if (picked != null) {
       setState(() => selectedDate = picked);
-      _loadOrders(reset: true);
+      _load();
     }
   }
 
-  void _clearFilters() {
-    setState(() {
-      selectedDate = null;
-      selectedStatus = null;
-    });
-    _loadOrders(reset: true);
-  }
-
-  String _formatDate(String? raw) {
-    if (raw == null) return '-';
+  // ── Item toggle ──────────────────────────────────────────
+  Future _toggleItem(int oi, int ii) async {
+    final item    = orders[oi]['order_items'][ii];
+    final itemId  = item['id'] as int;
+    final current = item['is_prepared'] == true;
+    if (_updatingItems.contains(itemId)) return;
+    setState(() => _updatingItems.add(itemId));
     try {
-      final dt = DateTime.parse(raw).toLocal();
-      final months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-      return "${dt.day} ${months[dt.month - 1]}, ${_pad(dt.hour)}:${_pad(dt.minute)}";
-    } catch (_) { return raw; }
+      await SupabaseService.toggleItemPrepared(itemId, !current);
+      setState(() => orders[oi]['order_items'][ii]['is_prepared'] = !current);
+    } finally {
+      setState(() => _updatingItems.remove(itemId));
+    }
   }
 
-  String _pad(int n) => n.toString().padLeft(2, '0');
+  Future _changeStatus(BuildContext context, int oi, String newStatus) async {
+    final order     = orders[oi];
+    final orderId   = order['id'] as int;
+    final oldStatus = order['status'] as String;
+    if (oldStatus == newStatus || _updatingOrders.contains(orderId)) return;
+    setState(() => _updatingOrders.add(orderId));
+    try {
+      await SupabaseService.updateOrderStatusRpc(
+        orderId: orderId, newStatus: newStatus);
+      setState(() => orders[oi]['status'] = newStatus);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to update: $e'),
+          backgroundColor: const Color(0xFF2D0A0A),
+        ));
+      }
+    } finally {
+      setState(() => _updatingOrders.remove(orderId));
+    }
+  }
 
+  void _showStatusPicker(BuildContext context, int oi) {
+    final current = orders[oi]['status'] as String;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        decoration: BoxDecoration(
+          color: Color(0xFF161B27),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border.all(color: Color(0xFF222840), width: 1),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(height: 12),
+            Container(width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: Color(0xFF2A3040),
+                borderRadius: BorderRadius.circular(2))),
+            SizedBox(height: 18),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 24),
+              child: Text("Update Status", style: TextStyle(
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+            ),
+            SizedBox(height: 12),
+            ..._statuses.map((s) {
+              final st        = StatusUtils.statusStyle(s);
+              final color     = st['color'] as Color;
+              final isCurrent = s == current;
+              final needsRpc  = _requiresRpc(current, s);
+              return ListTile(
+                contentPadding: EdgeInsets.symmetric(horizontal: 24, vertical: 2),
+                leading: Container(
+                  width: 36, height: 36,
+                  decoration: BoxDecoration(
+                    color: st['bg'], borderRadius: BorderRadius.circular(10)),
+                  child: Icon(st['icon'], color: color, size: 18),
+                ),
+                title: Text(TextUtils.capitalize(s), style: TextStyle(
+                  color: isCurrent ? color : Colors.white,
+                  fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: needsRpc
+                    ? Row(children: [
+                        Icon(Icons.bolt_rounded, size: 11, color: Color(0xFF10B981)),
+                        SizedBox(width: 3),
+                        Text("Applies cash inflow",
+                          style: TextStyle(color: Color(0xFF10B981), fontSize: 11)),
+                      ])
+                    : null,
+                trailing: isCurrent
+                    ? Icon(Icons.check_rounded, color: color, size: 18)
+                    : null,
+                onTap: isCurrent ? null : () {
+                  Navigator.pop(context);
+                  _changeStatus(context, oi, s);
+                },
+              );
+            }),
+            SizedBox(height: 28),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Color(0xFF0F1117),
+      body: SafeArea(
+        child: Column(children: [
+          _buildHeader(),
+          _buildFilterBar(),
+          Expanded(
+            child: loading
+                ? Center(child: SizedBox(width: 32, height: 32,
+                    child: CircularProgressIndicator(strokeWidth: 2.5, color: _cyan)))
+                : orders.isEmpty
+                    ? Center(child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.delivery_dining_outlined,
+                            color: Color(0xFF2A3040), size: 52),
+                          SizedBox(height: 12),
+                          Text("No orders found",
+                            style: TextStyle(color: Color(0xFF4A5568), fontSize: 14)),
+                        ],
+                      ))
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: EdgeInsets.fromLTRB(16, 0, 16, 24),
+                        itemCount: orders.length + (_hasMore ? 1 : 0),
+                        itemBuilder: (ctx, i) {
+                          if (i == orders.length) {
+                            return Padding(
+                              padding: EdgeInsets.symmetric(vertical: 16),
+                              child: Center(child: SizedBox(width: 24, height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: _cyan))),
+                            );
+                          }
+                          return _buildCard(ctx, i);
+                        },
+                      ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ── Invoice ──────────────────────────────────────────────
   String _formatPrice(dynamic price) {
     if (price == null) return '0';
-    final num = double.tryParse(price.toString()) ?? 0;
-    final str = num.toStringAsFixed(0);
+    final num = (double.tryParse(price.toString()) ?? 0).round();
+    final str = num.toString();
     final buffer = StringBuffer();
     for (int i = 0; i < str.length; i++) {
       if (i > 0 && (str.length - i) % 3 == 0) buffer.write('.');
@@ -141,48 +299,17 @@ class _OrderPageState extends State<OrderPage> {
     return buffer.toString();
   }
 
-  Map<String, dynamic> _statusStyle(String? status) {
-    switch (status) {
-      case 'pending':    return {'color': Color(0xFFF59E0B), 'bg': Color(0xFF2D1F0A), 'icon': Icons.hourglass_empty_rounded};
-      case 'paid':       return {'color': Color(0xFF6C63FF), 'bg': Color(0xFF1E1B4B), 'icon': Icons.check_circle_outline_rounded};
-      case 'prepared':   return {'color': Color(0xFF06B6D4), 'bg': Color(0xFF0C2A3A), 'icon': Icons.kitchen_rounded};
-      case 'picked up':  return {'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030), 'icon': Icons.directions_bike_rounded};
-      case 'delivered':  return {'color': Color(0xFF10B981), 'bg': Color(0xFF062318), 'icon': Icons.task_alt_rounded};
-      case 'cancelled':  return {'color': Color(0xFFEF4444), 'bg': Color(0xFF2D0A0A), 'icon': Icons.cancel_outlined};
-      default:           return {'color': Color(0xFF94A3B8), 'bg': Color(0xFF1A1F2E), 'icon': Icons.circle_outlined};
-    }
-  }
-
-  bool get _hasActiveFilters => selectedDate != null || selectedStatus != null;
-
-  // ── Invoice text generator ────────────────────────────────
-  // String _buildInvoiceText(Map order) {
-  //   final customer = order['customers'] as Map? ?? {};
-  //   final phone = customer['phone'] ?? '';
-  //   final status = order['status'] ?? '';
-  //   final deliveryType = order['delivery_type'] ?? 'pickup';
-  //   final typeLabel = deliveryType == 'delivery' ? 'Delivery' : 'In';
-  //   final orderId = order['id'];
-
-  //   // We don't have items in the list view, so we'll show a placeholder
-  //   // The full invoice with items is built in the detail sheet
-  //   final buffer = StringBuffer();
-  //   buffer.writeln("Order $orderId - $typeLabel | $phone | $status");
-  //   return buffer.toString().trim();
-  // }
-
-  // Full invoice text built from order detail data
   String _buildFullInvoiceText(Map<String, dynamic> order) {
-    final customer = order['customers'] as Map? ?? {};
+    final customer     = order['customers'] as Map? ?? {};
     final customerName = customer['name'];
-    final phone = customer['phone'] ?? '';
-    final status = order['status'] ?? '';
-    final orderId = order['id'];
-    final items = (order['order_items'] as List?) ?? [];
+    final phone        = customer['phone'] ?? '';
+    final status       = order['status'] ?? '';
+    final orderId      = order['id'];
+    final items        = (order['order_items'] as List?) ?? [];
     final deliveryPrice = double.tryParse(order['delivery_price']?.toString() ?? '0') ?? 0;
-    final total = double.tryParse(order['total_amount']?.toString() ?? '0') ?? 0;
-    final lat = customer['latitude'];
-    final lng = customer['longitude'];
+    final total         = double.tryParse(order['total_amount']?.toString()   ?? '0') ?? 0;
+    final lat  = customer['latitude'];
+    final lng  = customer['longitude'];
 
     final buffer = StringBuffer();
     buffer.writeln("Order $orderId - $customerName | $phone | $status");
@@ -192,18 +319,18 @@ class _OrderPageState extends State<OrderPage> {
     }
 
     for (final item in items) {
-      final product = item['products'] as Map? ?? {};
-      final variant = item['product_variants'] as Map? ?? {};
-      final qty = double.tryParse(item['quantity'].toString()) ?? 0;
-      final price = double.tryParse(item['sell_price'].toString()) ?? 0;
+      final product        = item['products'] as Map? ?? {};
+      final variant        = item['product_variants'] as Map? ?? {};
+      final qty            = double.tryParse(item['quantity'].toString()) ?? 0;
+      final price          = double.tryParse(item['sell_price'].toString()) ?? 0;
       final productNameRaw = product['name'] ?? '-';
-      final productName = productNameRaw.replaceAll(RegExp(r'\(.*?\)'), '').trim();
+      final productName    = productNameRaw.replaceAll(RegExp(r'\(.*?\)'), '').trim();
       final variantNameRaw = variant['name'] ?? '';
-      final variantName = variantNameRaw.toLowerCase() == 'default' ? '' : "[$variantNameRaw]";
-      final unit = variant['unit'] ?? product['unit'] ?? '';
-      final qtyStr = qty % 1 == 0 ? qty.toInt().toString() : qty.toString();
-      final label = variantName.isNotEmpty ? "$productName $variantName" : productName;
-      buffer.writeln(" - $label $qtyStr $unit ${_formatPrice(price*qty)}");
+      final variantName    = variantNameRaw.toLowerCase() == 'default' ? '' : "[$variantNameRaw]";
+      final unit           = variant['unit'] ?? product['unit'] ?? '';
+      final qtyStr         = qty % 1 == 0 ? qty.toInt().toString() : qty.toString();
+      final label          = variantName.isNotEmpty ? "$productName $variantName" : productName;
+      buffer.writeln(" - $label $qtyStr $unit ${_formatPrice(price * qty)}");
     }
 
     if (deliveryPrice > 0) {
@@ -214,491 +341,225 @@ class _OrderPageState extends State<OrderPage> {
     return buffer.toString();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Color(0xFF0F1117),
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildHeader(context),
-            _buildFilterBar(context),
-            if (_hasActiveFilters) _buildActiveFilters(),
-            SizedBox(height: 8),
-            Expanded(child: _buildBody()),
-          ],
-        ),
+  Future<void> _copyInvoice(BuildContext context, Map order) async {
+    final text = _buildFullInvoiceText(Map<String, dynamic>.from(order));
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(children: [
+          Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 16),
+          SizedBox(width: 10),
+          Text("Invoice copied!", style: TextStyle(fontSize: 13)),
+        ]),
+        backgroundColor: Color(0xFF1E2333),
+        duration: Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context) {
+  // ── Header (back button + title) ─────────────────────────
+  Widget _buildHeader() {
     return Padding(
       padding: EdgeInsets.fromLTRB(24, 24, 24, 0),
       child: Row(
         children: [
+          // Back button
           GestureDetector(
             onTap: () => Navigator.pop(context),
             child: Container(
-              width: 40, height: 40,
+              width: 40,
+              height: 40,
               decoration: BoxDecoration(
                 color: Color(0xFF1E2333),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: Color(0xFF2A3040), width: 1),
               ),
-              child: Icon(Icons.arrow_back_rounded, color: Color(0xFF94A3B8), size: 20),
+              child: Icon(Icons.arrow_back_rounded,
+                color: Color(0xFF94A3B8), size: 20),
             ),
           ),
           SizedBox(width: 16),
+          // Title + count
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text("Orders", style: TextStyle(
-                  color: Colors.white, fontSize: 22,
-                  fontWeight: FontWeight.w800, letterSpacing: -0.5,
-                )),
+                Text(
+                  "Orders",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.5,
+                  ),
+                ),
                 if (!loading)
-                  Text("${orders.length}${hasMore ? '+' : ''} orders",
-                    style: TextStyle(color: Color(0xFF64748B), fontSize: 13)),
+                  Text(
+                    "${orders.length} orders",
+                    style: TextStyle(
+                      color: Color(0xFF64748B),
+                      fontSize: 13,
+                    ),
+                  ),
               ],
             ),
-          ),
-          Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-              color: _amberBg,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: _amber.withOpacity(0.3), width: 1),
-            ),
-            child: Icon(Icons.add_rounded, color: _amber, size: 22),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildFilterBar(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(24, 20, 24, 0),
-      child: Row(
-        children: [
+  Widget _buildFilterBar() {
+    final bool hasDate   = selectedDate != null;
+    final bool hasStatus = selectedStatus != null;
+
+    return Container(
+      padding: EdgeInsets.fromLTRB(16, 14, 16, 10),
+      color: Color(0xFF0F1117),
+      child: Column(children: [
+        // Search by name
+        Container(
+          height: 40,
+          padding: EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: Color(0xFF161B27),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Color(0xFF222840), width: 1),
+          ),
+          child: Row(children: [
+            Icon(Icons.search_rounded, size: 16, color: Color(0xFF4A5568)),
+            SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _nameController,
+                style: TextStyle(color: Colors.white, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'Search by customer name…',
+                  hintStyle: TextStyle(color: Color(0xFF4A5568), fontSize: 13),
+                  border: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.zero,
+                ),
+                onChanged: (v) {
+                  _nameQuery = v;
+                  Future.delayed(Duration(milliseconds: 400), () {
+                    if (_nameQuery == v) _load();
+                  });
+                },
+              ),
+            ),
+            if (_nameQuery.isNotEmpty)
+              GestureDetector(
+                onTap: () {
+                  _nameController.clear();
+                  _nameQuery = '';
+                  _load();
+                },
+                child: Icon(Icons.close_rounded, size: 15, color: Color(0xFF4A5568)),
+              ),
+          ]),
+        ),
+
+        SizedBox(height: 8),
+
+        // Date + Status chips
+        Row(children: [
+          // Date chip
           Expanded(
             child: GestureDetector(
               onTap: () => _pickDate(context),
               child: Container(
-                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                height: 36,
+                padding: EdgeInsets.symmetric(horizontal: 10),
                 decoration: BoxDecoration(
-                  color: selectedDate != null ? _amberBg : Color(0xFF161B27),
-                  borderRadius: BorderRadius.circular(12),
+                  color: hasDate ? _cyanBg : Color(0xFF161B27),
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(
-                    color: selectedDate != null ? _amber.withOpacity(0.4) : Color(0xFF222840),
-                    width: 1,
-                  ),
+                    color: hasDate ? _cyan.withOpacity(0.4) : Color(0xFF222840),
+                    width: 1),
                 ),
-                child: Row(
-                  children: [
-                    Icon(Icons.calendar_today_rounded,
-                      size: 15,
-                      color: selectedDate != null ? _amber : Color(0xFF4A5568),
+                child: Row(children: [
+                  Icon(Icons.calendar_today_rounded,
+                    size: 13, color: hasDate ? _cyan : Color(0xFF4A5568)),
+                  SizedBox(width: 6),
+                  Expanded(child: Text(
+                    hasDate
+                        ? AppDateUtils.DateUtils.formatFullDate(selectedDate!)
+                        : 'All dates',
+                    style: TextStyle(
+                      color: hasDate ? _cyan : Color(0xFF4A5568),
+                      fontSize: 11, fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  )),
+                  if (hasDate)
+                    GestureDetector(
+                      onTap: () { setState(() => selectedDate = null); _load(); },
+                      child: Icon(Icons.close_rounded, size: 13, color: _cyan),
                     ),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        selectedDate != null
-                            ? "${selectedDate!.day}/${selectedDate!.month}/${selectedDate!.year}"
-                            : "Pick date",
-                        style: TextStyle(
-                          color: selectedDate != null ? _amber : Color(0xFF4A5568),
-                          fontSize: 13, fontWeight: FontWeight.w600,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
+                ]),
               ),
             ),
           ),
-          SizedBox(width: 10),
+
+          SizedBox(width: 8),
+
+          // Status chip
           Expanded(
             child: GestureDetector(
-              onTap: () => _showStatusPicker(context),
+              onTap: () => _showFilterStatusPicker(context),
               child: Container(
-                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                height: 36,
+                padding: EdgeInsets.symmetric(horizontal: 10),
                 decoration: BoxDecoration(
-                  color: selectedStatus != null
-                      ? _statusStyle(selectedStatus)['bg']
+                  color: hasStatus
+                      ? (StatusUtils.statusStyle(selectedStatus!)['bg'] as Color)
                       : Color(0xFF161B27),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(
-                    color: selectedStatus != null
-                        ? (_statusStyle(selectedStatus)['color'] as Color).withOpacity(0.4)
+                    color: hasStatus
+                        ? (StatusUtils.statusStyle(selectedStatus!)['color'] as Color)
+                            .withOpacity(0.4)
                         : Color(0xFF222840),
-                    width: 1,
-                  ),
+                    width: 1),
                 ),
-                child: Row(
-                  children: [
-                    Icon(Icons.tune_rounded,
-                      size: 15,
-                      color: selectedStatus != null
-                          ? _statusStyle(selectedStatus)['color']
+                child: Row(children: [
+                  Icon(
+                    hasStatus
+                        ? (StatusUtils.statusStyle(selectedStatus!)['icon'] as IconData)
+                        : Icons.filter_list_rounded,
+                    size: 13,
+                    color: hasStatus
+                        ? (StatusUtils.statusStyle(selectedStatus!)['color'] as Color)
+                        : Color(0xFF4A5568),
+                  ),
+                  SizedBox(width: 6),
+                  Expanded(child: Text(
+                    hasStatus ? TextUtils.capitalize(selectedStatus!) : 'All statuses',
+                    style: TextStyle(
+                      color: hasStatus
+                          ? (StatusUtils.statusStyle(selectedStatus!)['color'] as Color)
                           : Color(0xFF4A5568),
-                    ),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        selectedStatus != null
-                            ? _capitalize(selectedStatus!)
-                            : "Status",
-                        style: TextStyle(
-                          color: selectedStatus != null
-                              ? _statusStyle(selectedStatus)['color']
-                              : Color(0xFF4A5568),
-                          fontSize: 13, fontWeight: FontWeight.w600,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActiveFilters() {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(24, 12, 24, 0),
-      child: Row(
-        children: [
-          Icon(Icons.filter_list_rounded, size: 13, color: Color(0xFF64748B)),
-          SizedBox(width: 6),
-          Text("Filters active", style: TextStyle(color: Color(0xFF64748B), fontSize: 12)),
-          Spacer(),
-          GestureDetector(
-            onTap: _clearFilters,
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: Color(0xFF2D0A0A),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Color(0xFFEF4444).withOpacity(0.3), width: 1),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.close_rounded, size: 12, color: Color(0xFFEF4444)),
-                  SizedBox(width: 4),
-                  Text("Clear", style: TextStyle(
-                    color: Color(0xFFEF4444), fontSize: 11, fontWeight: FontWeight.w600,
+                      fontSize: 11, fontWeight: FontWeight.w600),
                   )),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBody() {
-    if (loading) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            SizedBox(
-              width: 36, height: 36,
-              child: CircularProgressIndicator(strokeWidth: 2.5, color: _amber),
-            ),
-            SizedBox(height: 16),
-            Text("Loading orders...",
-              style: TextStyle(color: Color(0xFF4A5568), fontSize: 14)),
-          ],
-        ),
-      );
-    }
-
-    if (orders.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.receipt_long_outlined, color: Color(0xFF2A3040), size: 64),
-            SizedBox(height: 16),
-            Text("No orders found",
-              style: TextStyle(color: Color(0xFF4A5568), fontSize: 15)),
-            if (_hasActiveFilters) ...[
-              SizedBox(height: 8),
-              GestureDetector(
-                onTap: _clearFilters,
-                child: Text("Clear filters",
-                  style: TextStyle(color: _amber, fontSize: 13, fontWeight: FontWeight.w600)),
-              ),
-            ],
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      controller: _scrollController,
-      padding: EdgeInsets.fromLTRB(24, 0, 24, 24),
-      itemCount: orders.length + (loadingMore ? 1 : 0),
-      itemBuilder: (context, index) {
-        if (index == orders.length) {
-          return Padding(
-            padding: EdgeInsets.symmetric(vertical: 20),
-            child: Center(
-              child: SizedBox(
-                width: 24, height: 24,
-                child: CircularProgressIndicator(strokeWidth: 2, color: _amber),
-              ),
-            ),
-          );
-        }
-        return _buildOrderCard(orders[index], index);
-      },
-    );
-  }
-
-  Widget _buildOrderCard(Map order, int index) {
-    final style = _statusStyle(order['status']);
-    final color = style['color'] as Color;
-    final bg = style['bg'] as Color;
-    final icon = style['icon'] as IconData;
-    final isDelivery = order['delivery_type'] == 'delivery';
-
-    return Container(
-      margin: EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Color(0xFF161B27),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Color(0xFF222840), width: 1),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(18),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(18),
-          splashColor: _amber.withOpacity(0.06),
-          onTap: () => _showOrderDetail(context, order['id'], onStatusUpdated: _loadOrders),
-          child: Padding(
-            padding: EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Top row
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Text(
-                                "#${order['id']}",
-                                style: TextStyle(
-                                  color: _amber,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              SizedBox(width: 8),
-                              Container(
-                                padding: EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: isDelivery ? Color(0xFF0C2A3A) : Color(0xFF1E1B4B),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      isDelivery ? Icons.delivery_dining_rounded : Icons.storefront_rounded,
-                                      size: 10,
-                                      color: isDelivery ? Color(0xFF06B6D4) : Color(0xFF6C63FF),
-                                    ),
-                                    SizedBox(width: 4),
-                                    Text(
-                                      isDelivery ? "Delivery" : "Pickup",
-                                      style: TextStyle(
-                                        color: isDelivery ? Color(0xFF06B6D4) : Color(0xFF6C63FF),
-                                        fontSize: 10, fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                          SizedBox(height: 5),
-                          Text(
-                            order['customers']?['name'] ?? 'Unknown Customer',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 15, fontWeight: FontWeight.w700,
-                              letterSpacing: -0.2,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    // Status badge
-                    Container(
-                      padding: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: bg,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: color.withOpacity(0.25), width: 1),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(icon, size: 12, color: color),
-                          SizedBox(width: 5),
-                          Text(
-                            _capitalize(order['status'] ?? ''),
-                            style: TextStyle(
-                              color: color, fontSize: 11, fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-
-                SizedBox(height: 14),
-                Divider(color: Color(0xFF222840), height: 1),
-                SizedBox(height: 12),
-
-                // Bottom row: time + copy invoice button + total
-                Row(
-                  children: [
-                    Icon(Icons.access_time_rounded, size: 13, color: Color(0xFF4A5568)),
-                    SizedBox(width: 5),
-                    Text(
-                      _formatDate(order['order_date']),
-                      style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
-                    ),
-                    Spacer(),
-                    // Copy invoice button (opens detail to get full data)
+                  if (hasStatus)
                     GestureDetector(
-                      onTap: () => _copyInvoiceFromCard(context, order['id']),
-                      child: Container(
-                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        margin: EdgeInsets.only(right: 10),
-                        decoration: BoxDecoration(
-                          color: Color(0xFF1A1F2E),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Color(0xFF2A3040), width: 1),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.copy_rounded, size: 11, color: Color(0xFF64748B)),
-                            SizedBox(width: 4),
-                            Text("Invoice", style: TextStyle(
-                              color: Color(0xFF64748B), fontSize: 11, fontWeight: FontWeight.w600,
-                            )),
-                          ],
-                        ),
-                      ),
+                      onTap: () { setState(() => selectedStatus = null); _load(); },
+                      child: Icon(Icons.close_rounded, size: 13,
+                        color: StatusUtils.statusStyle(selectedStatus!)['color'] as Color),
                     ),
-                    Text(
-                      "Rp ${_formatPrice(order['total_amount'])}",
-                      style: TextStyle(
-                        color: Color(0xFF10B981),
-                        fontSize: 15, fontWeight: FontWeight.w800,
-                        letterSpacing: -0.3,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+                ]),
+              ),
             ),
           ),
-        ),
-      ),
+        ]),
+      ]),
     );
   }
 
-  Future<void> _copyInvoiceFromCard(BuildContext context, int orderId) async {
-    // Show a brief loading snackbar
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            SizedBox(width: 16, height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
-            SizedBox(width: 12),
-            Text("Building invoice...", style: TextStyle(fontSize: 13)),
-          ],
-        ),
-        backgroundColor: Color(0xFF1E2333),
-        duration: Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    );
-
-    try {
-      final detail = await SupabaseService.getOrderDetail(orderId);
-      final text = _buildFullInvoiceText(detail);
-      await Clipboard.setData(ClipboardData(text: text));
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 16),
-              SizedBox(width: 10),
-              Text("Invoice copied!", style: TextStyle(fontSize: 13)),
-            ],
-          ),
-          backgroundColor: Color(0xFF1E2333),
-          duration: Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ),
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("Failed to copy invoice", style: TextStyle(fontSize: 13)),
-          backgroundColor: Color(0xFF2D0A0A),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ),
-      );
-    }
-  }
-
-  void _showOrderDetail(BuildContext context, int orderId, {VoidCallback? onStatusUpdated}) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _OrderDetailSheet(
-        orderId: orderId,
-        onStatusUpdated: onStatusUpdated,
-        buildInvoiceText: _buildFullInvoiceText,
-      ),
-    );
-  }
-
-  void _showStatusPicker(BuildContext context) {
+  void _showFilterStatusPicker(BuildContext context) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -712,687 +573,384 @@ class _OrderPageState extends State<OrderPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             SizedBox(height: 12),
-            Container(
-              width: 36, height: 4,
+            Container(width: 36, height: 4,
               decoration: BoxDecoration(
                 color: Color(0xFF2A3040),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            SizedBox(height: 20),
+                borderRadius: BorderRadius.circular(2))),
+            SizedBox(height: 18),
             Padding(
               padding: EdgeInsets.symmetric(horizontal: 24),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text("Filter by Status", style: TextStyle(
-                    color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700,
-                  )),
-                  if (selectedStatus != null)
-                    GestureDetector(
-                      onTap: () {
-                        setState(() => selectedStatus = null);
-                        Navigator.pop(context);
-                        _loadOrders(reset: true);
-                      },
-                      child: Text("Clear", style: TextStyle(
-                        color: Color(0xFFEF4444), fontSize: 13, fontWeight: FontWeight.w600,
-                      )),
-                    ),
-                ],
-              ),
+              child: Text("Filter by Status", style: TextStyle(
+                color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
             ),
-            SizedBox(height: 16),
-            ...statuses.map((s) {
-              final style = _statusStyle(s);
-              final isSelected = selectedStatus == s;
+            SizedBox(height: 12),
+            ListTile(
+              contentPadding: EdgeInsets.symmetric(horizontal: 24, vertical: 2),
+              leading: Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  color: Color(0xFF1A2035),
+                  borderRadius: BorderRadius.circular(10)),
+                child: Icon(Icons.all_inclusive_rounded,
+                  color: Color(0xFF64748B), size: 18),
+              ),
+              title: Text("All statuses", style: TextStyle(
+                color: selectedStatus == null ? Colors.white : Color(0xFF64748B),
+                fontSize: 14, fontWeight: FontWeight.w600)),
+              trailing: selectedStatus == null
+                  ? Icon(Icons.check_rounded, color: _cyan, size: 18)
+                  : null,
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => selectedStatus = null);
+                _load();
+              },
+            ),
+            ..._statuses.map((s) {
+              final st        = StatusUtils.statusStyle(s);
+              final color     = st['color'] as Color;
+              final isCurrent = s == selectedStatus;
               return ListTile(
                 contentPadding: EdgeInsets.symmetric(horizontal: 24, vertical: 2),
                 leading: Container(
                   width: 36, height: 36,
                   decoration: BoxDecoration(
-                    color: style['bg'],
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(style['icon'], color: style['color'], size: 18),
+                    color: st['bg'], borderRadius: BorderRadius.circular(10)),
+                  child: Icon(st['icon'], color: color, size: 18),
                 ),
-                title: Text(
-                  _capitalize(s),
-                  style: TextStyle(
-                    color: isSelected ? style['color'] : Colors.white,
-                    fontSize: 14, fontWeight: FontWeight.w600,
-                  ),
-                ),
-                trailing: isSelected
-                    ? Icon(Icons.check_rounded, color: style['color'], size: 18)
+                title: Text(TextUtils.capitalize(s), style: TextStyle(
+                  color: isCurrent ? color : Colors.white,
+                  fontSize: 14, fontWeight: FontWeight.w600)),
+                trailing: isCurrent
+                    ? Icon(Icons.check_rounded, color: color, size: 18)
                     : null,
                 onTap: () {
+                  Navigator.pop(context);
                   setState(() => selectedStatus = s);
-                  Navigator.pop(context);
-                  _loadOrders(reset: true);
+                  _load();
                 },
               );
             }),
-            SizedBox(height: 24),
+            SizedBox(height: 28),
           ],
         ),
       ),
     );
   }
 
-  String _capitalize(String s) {
-    if (s.isEmpty) return s;
-    return s[0].toUpperCase() + s.substring(1);
-  }
-}
+  Widget _buildCard(BuildContext context, int oi) {
+    final o          = orders[oi];
+    final orderId    = o['id'] as int;
+    final orderDate  = DateTime.tryParse(o['order_date']?.toString() ?? '');
+    final orderLocal = orderDate?.toLocal();
 
-// ─────────────────────────────────────────────
-// Order Detail Bottom Sheet
-// ─────────────────────────────────────────────
+    // Full date string: e.g. "17 Mar 2025, 14:30"
+    final orderDateLabel = orderLocal != null
+        ? AppDateUtils.DateUtils.formatFullDate(orderLocal)
+        : '—';
+    final orderTimeLabel = orderLocal != null
+        ? "${orderLocal.hour.toString().padLeft(2, '0')}:${orderLocal.minute.toString().padLeft(2, '0')}"
+        : '--:--';
 
-class _OrderDetailSheet extends StatefulWidget {
-  final int orderId;
-  final VoidCallback? onStatusUpdated;
-  final String Function(Map<String, dynamic>)? buildInvoiceText;
+    final customer   = o['customers'] as Map? ?? {};
+    final items      = (o['order_items'] as List?) ?? [];
+    final isSelected = selectedOrderIndex == oi;
+    final isUpdating = _updatingOrders.contains(orderId);
+    final st         = StatusUtils.statusStyle(o['status']);
+    final statusColor = st['color'] as Color;
+    final hasCoords   = double.tryParse(customer['latitude']?.toString() ?? '') != null;
+    final total    = double.tryParse(o['total_amount']?.toString()   ?? '0') ?? 0;
+    final delivery = double.tryParse(o['delivery_price']?.toString() ?? '0') ?? 0;
+    final subtotal = total - delivery;
 
-  const _OrderDetailSheet({
-    required this.orderId,
-    this.onStatusUpdated,
-    this.buildInvoiceText,
-  });
-
-  @override
-  State<_OrderDetailSheet> createState() => _OrderDetailSheetState();
-}
-
-class _OrderDetailSheetState extends State<_OrderDetailSheet> {
-  Map<String, dynamic>? order;
-  bool loading = true;
-  bool updatingStatus = false;
-
-  static const Color _amber = Color(0xFFF59E0B);
-
-  final List<String> _allStatuses = [
-    'pending', 'paid', 'prepared', 'picked up', 'delivered', 'cancelled'
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future _load() async {
-    final data = await SupabaseService.getOrderDetail(widget.orderId);
-    setState(() { order = data; loading = false; });
-  }
-
-  Future _togglePrepared(int itemId, bool current) async {
-    await SupabaseService.toggleItemPrepared(itemId, !current);
-    final items = order!['order_items'] as List;
-    final idx = items.indexWhere((i) => i['id'] == itemId);
-    if (idx != -1) {
-      setState(() => items[idx]['is_prepared'] = !current);
-    }
-  }
-
-  Future<void> _updateStatus(String newStatus) async {
-    if (updatingStatus) return;
-    final currentStatus = order!['status'];
-    if (currentStatus == newStatus) return;
-
-    setState(() => updatingStatus = true);
-
-    try {
-      await SupabaseService.updateOrderStatusRpc(
-        orderId: widget.orderId,
-        newStatus: newStatus,
-      );
-      setState(() {
-        order!['status'] = newStatus;
-        updatingStatus = false;
-      });
-      widget.onStatusUpdated?.call();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 16),
-                SizedBox(width: 10),
-                Text("Status updated to ${_capitalize(newStatus)}",
-                  style: TextStyle(fontSize: 13)),
-              ],
-            ),
-            backgroundColor: Color(0xFF1E2333),
-            duration: Duration(seconds: 2),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-        );
-      }
-    } catch (e) {
-      setState(() => updatingStatus = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Failed: ${e.toString().replaceAll('Exception: ', '')}",
-              style: TextStyle(fontSize: 12)),
-            backgroundColor: Color(0xFF2D0A0A),
-            duration: Duration(seconds: 3),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-        );
-      }
-    }
-  }
-
-  void _showStatusDropdown(BuildContext context) {
-    final currentStatus = order!['status'] as String?;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Container(
+    return GestureDetector(
+      onTap: () {
+        final was = selectedOrderIndex == oi;
+        setState(() => selectedOrderIndex = was ? null : oi);
+      },
+      child: AnimatedContainer(
+        duration: Duration(milliseconds: 200),
+        margin: EdgeInsets.only(bottom: 10),
         decoration: BoxDecoration(
           color: Color(0xFF161B27),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          border: Border.all(color: Color(0xFF222840), width: 1),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: isSelected ? _cyan.withOpacity(0.5) : Color(0xFF222840),
+            width: isSelected ? 1.5 : 1,
+          ),
+          boxShadow: isSelected
+              ? [BoxShadow(color: _cyan.withOpacity(0.1), blurRadius: 16, offset: Offset(0, 4))]
+              : [],
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SizedBox(height: 12),
-            Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                color: Color(0xFF2A3040),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            SizedBox(height: 20),
             Padding(
-              padding: EdgeInsets.symmetric(horizontal: 24),
-              child: Text("Update Status", style: TextStyle(
-                color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700,
-              )),
-            ),
-            SizedBox(height: 16),
-            ..._allStatuses.map((s) {
-              final style = _statusStyle(s);
-              final isSelected = currentStatus == s;
-              return ListTile(
-                contentPadding: EdgeInsets.symmetric(horizontal: 24, vertical: 2),
-                leading: Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    color: style['bg'],
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(style['icon'], color: style['color'], size: 18),
-                ),
-                title: Text(
-                  _capitalize(s),
-                  style: TextStyle(
-                    color: isSelected ? style['color'] : Colors.white,
-                    fontSize: 14, fontWeight: FontWeight.w600,
-                  ),
-                ),
-                trailing: isSelected
-                    ? Icon(Icons.check_rounded, color: style['color'], size: 18)
-                    : null,
-                onTap: () {
-                  Navigator.pop(context);
-                  _updateStatus(s);
-                },
-              );
-            }),
-            SizedBox(height: 24),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _copyInvoice(BuildContext context) async {
-    if (order == null || widget.buildInvoiceText == null) return;
-    final text = widget.buildInvoiceText!(order!);
-    await Clipboard.setData(ClipboardData(text: text));
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 16),
-            SizedBox(width: 10),
-            Text("Invoice copied!", style: TextStyle(fontSize: 13)),
-          ],
-        ),
-        backgroundColor: Color(0xFF1E2333),
-        duration: Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    );
-  }
-
-  String _formatPrice(dynamic price) {
-    if (price == null) return '0';
-    final num = double.tryParse(price.toString()) ?? 0;
-    final str = num.toStringAsFixed(0);
-    final buffer = StringBuffer();
-    for (int i = 0; i < str.length; i++) {
-      if (i > 0 && (str.length - i) % 3 == 0) buffer.write('.');
-      buffer.write(str[i]);
-    }
-    return buffer.toString();
-  }
-
-  String _formatDate(String? raw) {
-    if (raw == null) return '-';
-    try {
-      final dt = DateTime.parse(raw).toLocal();
-      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-      return "${dt.day} ${months[dt.month - 1]} ${dt.year}, ${_pad(dt.hour)}:${_pad(dt.minute)}";
-    } catch (_) { return raw; }
-  }
-
-  String _pad(int n) => n.toString().padLeft(2, '0');
-
-  Map<String, dynamic> _statusStyle(String? s) {
-    switch (s) {
-      case 'pending':    return {'color': Color(0xFFF59E0B), 'bg': Color(0xFF2D1F0A), 'icon': Icons.hourglass_empty_rounded};
-      case 'paid':       return {'color': Color(0xFF6C63FF), 'bg': Color(0xFF1E1B4B), 'icon': Icons.check_circle_outline_rounded};
-      case 'prepared':   return {'color': Color(0xFF06B6D4), 'bg': Color(0xFF0C2A3A), 'icon': Icons.kitchen_rounded};
-      case 'picked up':  return {'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030), 'icon': Icons.directions_bike_rounded};
-      case 'delivered':  return {'color': Color(0xFF10B981), 'bg': Color(0xFF062318), 'icon': Icons.task_alt_rounded};
-      case 'cancelled':  return {'color': Color(0xFFEF4444), 'bg': Color(0xFF2D0A0A), 'icon': Icons.cancel_outlined};
-      default:           return {'color': Color(0xFF94A3B8), 'bg': Color(0xFF1A1F2E), 'icon': Icons.circle_outlined};
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: 0.75,
-      minChildSize: 0.4,
-      maxChildSize: 0.95,
-      builder: (_, scrollController) => Container(
-        decoration: BoxDecoration(
-          color: Color(0xFF161B27),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          border: Border.all(color: Color(0xFF222840), width: 1),
-        ),
-        child: loading
-            ? Center(
-                child: SizedBox(
-                  width: 32, height: 32,
-                  child: CircularProgressIndicator(strokeWidth: 2.5, color: _amber),
-                ),
-              )
-            : _buildContent(scrollController),
-      ),
-    );
-  }
-
-  Widget _buildContent(ScrollController scrollController) {
-    final o = order!;
-    final customer = o['customers'] as Map? ?? {};
-    final items = (o['order_items'] as List?) ?? [];
-    final style = _statusStyle(o['status']);
-    final statusColor = style['color'] as Color;
-    final statusBg = style['bg'] as Color;
-    final isDelivery = o['delivery_type'] == 'delivery';
-
-    final subtotal = items.fold<double>(0, (sum, i) {
-      return sum + ((double.tryParse(i['sell_price'].toString()) ?? 0) *
-          (double.tryParse(i['quantity'].toString()) ?? 0));
-    });
-    final delivery = double.tryParse(o['delivery_price']?.toString() ?? '0') ?? 0;
-    final total = double.tryParse(o['total_amount']?.toString() ?? '0') ?? 0;
-
-    final preparedCount = items.where((i) => i['is_prepared'] == true).length;
-
-    return ListView(
-      controller: scrollController,
-      padding: EdgeInsets.fromLTRB(24, 0, 24, 36),
-      children: [
-        // Handle
-        Center(
-          child: Padding(
-            padding: EdgeInsets.symmetric(vertical: 14),
-            child: Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                color: Color(0xFF2A3040),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-        ),
-
-        // Header: order id + date + copy invoice button
-        Row(
-          children: [
-            Expanded(
-              child: Column(
+              padding: EdgeInsets.all(14),
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    "Order #${o['id']}",
-                    style: TextStyle(
-                      color: Colors.white, fontSize: 20,
-                      fontWeight: FontWeight.w800, letterSpacing: -0.5,
+                  Container(
+                    width: 42, height: 42,
+                    decoration: BoxDecoration(
+                      color: isSelected ? _cyanBg : Color(0xFF0F1117),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(Icons.delivery_dining_rounded,
+                      color: isSelected ? _cyan : Color(0xFF4A5568), size: 20),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Order ID + "On map" badge
+                        Row(children: [
+                          Text("#$orderId", style: TextStyle(
+                            color: _amber, fontSize: 12, fontWeight: FontWeight.w700)),
+                          SizedBox(width: 6),
+                          if (hasCoords) Container(
+                            padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: _cyanBg,
+                              borderRadius: BorderRadius.circular(5)),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.location_on_rounded, size: 9, color: _cyan),
+                              SizedBox(width: 3),
+                              Text("On map", style: TextStyle(
+                                color: _cyan, fontSize: 9, fontWeight: FontWeight.w600)),
+                            ]),
+                          ),
+                        ]),
+                        SizedBox(height: 3),
+                        Text(customer['name'] ?? 'Unknown', style: TextStyle(
+                          color: Colors.white, fontSize: 15,
+                          fontWeight: FontWeight.w700, letterSpacing: -0.2)),
+                        SizedBox(height: 4),
+                        // Date + time row
+                        Row(children: [
+                          Icon(Icons.access_time_rounded,
+                            size: 11, color: Color(0xFF4A5568)),
+                          SizedBox(width: 4),
+                          Text("$orderDateLabel · $orderTimeLabel",
+                            style: TextStyle(
+                              color: Color(0xFF4A5568),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w500,
+                            )),
+                        ]),
+                        SizedBox(height: 2),
+                        Text(customer['address'] ?? customer['phone'] ?? '—',
+                          style: TextStyle(color: Color(0xFF64748B), fontSize: 11),
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                        SizedBox(height: 6),
+                        // Total on card
+                        Text(
+                          "Rp ${_formatPrice(total)}",
+                          style: TextStyle(
+                            color: _amber,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  SizedBox(height: 5),
-                  Row(
+                  SizedBox(width: 8),
+                  // Right column: status + invoice + expand
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      Icon(Icons.access_time_rounded, size: 12, color: Color(0xFF4A5568)),
-                      SizedBox(width: 5),
-                      Text(
-                        _formatDate(o['order_date']),
-                        style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                      // Status badge
+                      GestureDetector(
+                        onTap: () => _showStatusPicker(context, oi),
+                        child: AnimatedContainer(
+                          duration: Duration(milliseconds: 150),
+                          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: st['bg'],
+                            borderRadius: BorderRadius.circular(9),
+                            border: Border.all(color: statusColor.withOpacity(0.3), width: 1),
+                          ),
+                          child: isUpdating
+                              ? SizedBox(
+                                  width: 58, height: 14,
+                                  child: Center(child: SizedBox(width: 12, height: 12,
+                                    child: CircularProgressIndicator(strokeWidth: 1.5, color: statusColor))))
+                              : Row(mainAxisSize: MainAxisSize.min, children: [
+                                  Icon(st['icon'], size: 11, color: statusColor),
+                                  SizedBox(width: 4),
+                                  Text(TextUtils.capitalize(o['status'] ?? ''), style: TextStyle(
+                                    color: statusColor, fontSize: 10, fontWeight: FontWeight.w700)),
+                                  SizedBox(width: 3),
+                                  Icon(Icons.expand_more_rounded, size: 12,
+                                    color: statusColor.withOpacity(0.7)),
+                                ]),
+                        ),
+                      ),
+                      SizedBox(height: 6),
+                      // Invoice copy button
+                      GestureDetector(
+                        onTap: () => _copyInvoice(context, o),
+                        child: Container(
+                          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Color(0xFF1A2035),
+                            borderRadius: BorderRadius.circular(9),
+                            border: Border.all(color: Color(0xFF2A3040), width: 1),
+                          ),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.receipt_long_rounded,
+                              size: 11, color: Color(0xFF94A3B8)),
+                            SizedBox(width: 4),
+                            Text("Invoice", style: TextStyle(
+                              color: Color(0xFF94A3B8),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            )),
+                          ]),
+                        ),
+                      ),
+                      SizedBox(height: 6),
+                      AnimatedRotation(
+                        turns: isSelected ? 0.5 : 0,
+                        duration: Duration(milliseconds: 200),
+                        child: Icon(Icons.keyboard_arrow_down_rounded,
+                          color: Color(0xFF4A5568), size: 20),
                       ),
                     ],
                   ),
                 ],
               ),
             ),
-            // Copy invoice button
-            GestureDetector(
-              onTap: () => _copyInvoice(context),
-              child: Container(
-                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                margin: EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  color: Color(0xFF1A1F2E),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Color(0xFF2A3040), width: 1),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.copy_rounded, size: 13, color: Color(0xFF64748B)),
-                    SizedBox(width: 5),
-                    Text("Invoice", style: TextStyle(
-                      color: Color(0xFF64748B), fontSize: 12, fontWeight: FontWeight.w600,
-                    )),
-                  ],
-                ),
-              ),
-            ),
-            // Status badge — tappable dropdown
-            GestureDetector(
-              onTap: updatingStatus ? null : () => _showStatusDropdown(context),
-              child: AnimatedContainer(
-                duration: Duration(milliseconds: 200),
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: statusBg,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: statusColor.withOpacity(0.25), width: 1),
-                ),
-                child: updatingStatus
-                    ? SizedBox(
-                        width: 14, height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: statusColor),
-                      )
-                    : Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(style['icon'], size: 13, color: statusColor),
-                          SizedBox(width: 6),
-                          Text(
-                            _capitalize(o['status'] ?? ''),
-                            style: TextStyle(color: statusColor, fontSize: 12, fontWeight: FontWeight.w700),
-                          ),
-                          SizedBox(width: 4),
-                          Icon(Icons.expand_more_rounded, size: 13, color: statusColor.withOpacity(0.7)),
-                        ],
-                      ),
-              ),
+
+            AnimatedCrossFade(
+              firstChild: SizedBox.shrink(),
+              secondChild: _buildExpanded(context, oi, items, subtotal, delivery, total),
+              crossFadeState: isSelected ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+              duration: Duration(milliseconds: 200),
             ),
           ],
         ),
+      ),
+    );
+  }
 
-        SizedBox(height: 20),
+  Widget _buildExpanded(
+    BuildContext context, int oi, List items,
+    double subtotal, double delivery, double total,
+  ) {
+    return Column(children: [
+      Divider(color: Color(0xFF222840), height: 1, indent: 14, endIndent: 14),
 
-        // Customer card
-        Container(
-          padding: EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: Color(0xFF0F1117),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Color(0xFF222840), width: 1),
-          ),
+      if (items.isNotEmpty) ...[
+        Padding(
+          padding: EdgeInsets.fromLTRB(14, 12, 14, 8),
           child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Container(
-                width: 40, height: 40,
-                decoration: BoxDecoration(
-                  color: Color(0xFF0C2A3A),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.person_rounded, color: Color(0xFF06B6D4), size: 20),
-              ),
-              SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      customer['name'] ?? 'Unknown',
-                      style: TextStyle(
-                        color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    if (customer['phone'] != null) ...[
-                      SizedBox(height: 2),
-                      Text(customer['phone'], style: TextStyle(color: Color(0xFF64748B), fontSize: 12)),
-                    ],
-                  ],
-                ),
-              ),
-              Container(
-                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDelivery ? Color(0xFF0C2A3A) : Color(0xFF1E1B4B),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      isDelivery ? Icons.delivery_dining_rounded : Icons.storefront_rounded,
-                      size: 12,
-                      color: isDelivery ? Color(0xFF06B6D4) : Color(0xFF6C63FF),
-                    ),
-                    SizedBox(width: 5),
-                    Text(
-                      isDelivery ? "Delivery" : "Pickup",
-                      style: TextStyle(
-                        color: isDelivery ? Color(0xFF06B6D4) : Color(0xFF6C63FF),
-                        fontSize: 11, fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              Text("ITEMS", style: TextStyle(
+                color: Color(0xFF4A5568), fontSize: 10,
+                fontWeight: FontWeight.w700, letterSpacing: 1.2)),
+              Text("${items.where((i) => i['is_prepared'] == true).length}/${items.length} prepared",
+                style: TextStyle(
+                  color: items.every((i) => i['is_prepared'] == true)
+                      ? Color(0xFF10B981) : Color(0xFF4A5568),
+                  fontSize: 10, fontWeight: FontWeight.w600)),
             ],
           ),
         ),
-
-        SizedBox(height: 20),
-
-        // Items header
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              "Items",
-              style: TextStyle(
-                color: Color(0xFF94A3B8), fontSize: 12,
-                fontWeight: FontWeight.w600, letterSpacing: 1.2,
-              ),
-            ),
-            Container(
-              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: preparedCount == items.length && items.isNotEmpty
-                    ? Color(0xFF062318) : Color(0xFF2D1F0A),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                "$preparedCount / ${items.length} prepared",
-                style: TextStyle(
-                  color: preparedCount == items.length && items.isNotEmpty
-                      ? Color(0xFF10B981) : _amber,
-                  fontSize: 11, fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-
-        SizedBox(height: 10),
-
-        // Items list
-        ...items.map((item) {
-          final product = item['products'] as Map? ?? {};
-          final variant = item['product_variants'] as Map? ?? {};
+        ...List.generate(items.length, (ii) {
+          final item       = items[ii];
+          final itemId     = item['id'] as int;
+          final product    = item['products'] as Map? ?? {};
+          final variant    = item['product_variants'] as Map?;
+          final qty        = double.tryParse(item['quantity'].toString()) ?? 0;
+          final price      = double.tryParse(item['sell_price'].toString()) ?? 0;
           final isPrepared = item['is_prepared'] == true;
-          final qty = double.tryParse(item['quantity'].toString()) ?? 0;
-          final price = double.tryParse(item['sell_price'].toString()) ?? 0;
-          final lineTotal = qty * price;
+          final isLoading  = _updatingItems.contains(itemId);
 
-          return Container(
-            margin: EdgeInsets.only(bottom: 10),
-            padding: EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Color(0xFF0F1117),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: isPrepared ? Color(0xFF10B981).withOpacity(0.2) : Color(0xFF222840),
-                width: 1,
-              ),
-            ),
-            child: Row(
-              children: [
-                GestureDetector(
-                  onTap: () => _togglePrepared(item['id'], isPrepared),
-                  child: AnimatedContainer(
-                    duration: Duration(milliseconds: 200),
-                    width: 26, height: 26,
-                    decoration: BoxDecoration(
-                      color: isPrepared ? Color(0xFF10B981) : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: isPrepared ? Color(0xFF10B981) : Color(0xFF2A3040),
-                        width: 1.5,
-                      ),
-                    ),
-                    child: isPrepared
-                        ? Icon(Icons.check_rounded, color: Colors.white, size: 14)
-                        : null,
+          return GestureDetector(
+            onTap: () => _toggleItem(oi, ii),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(14, 0, 14, 10),
+              child: Row(children: [
+                AnimatedContainer(
+                  duration: Duration(milliseconds: 180),
+                  width: 24, height: 24,
+                  decoration: BoxDecoration(
+                    color: isPrepared ? Color(0xFF062318) : Colors.transparent,
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(
+                      color: isPrepared ? Color(0xFF10B981) : Color(0xFF2A3040),
+                      width: 1.5),
                   ),
+                  child: isLoading
+                      ? Padding(padding: EdgeInsets.all(4),
+                          child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF10B981)))
+                      : isPrepared
+                          ? Icon(Icons.check_rounded, size: 14, color: Color(0xFF10B981))
+                          : null,
                 ),
+                SizedBox(width: 10),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(product['name'] ?? '—', style: TextStyle(
+                      color: isPrepared ? Color(0xFF4A5568) : Colors.white,
+                      fontSize: 13, fontWeight: FontWeight.w600,
+                      decoration: isPrepared ? TextDecoration.lineThrough : null,
+                      decorationColor: Color(0xFF4A5568),
+                    )),
+                    if (variant != null)
+                      Text(variant['name'] ?? '',
+                        style: TextStyle(color: Color(0xFF6C63FF), fontSize: 10)),
+                  ],
+                )),
+                Text("${qty % 1 == 0 ? qty.toInt() : qty} ${product['unit'] ?? ''}",
+                  style: TextStyle(color: Color(0xFF64748B), fontSize: 11)),
                 SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        product['name'] ?? '-',
-                        style: TextStyle(
-                          color: isPrepared ? Color(0xFF4A5568) : Colors.white,
-                          fontSize: 14, fontWeight: FontWeight.w600,
-                          decoration: isPrepared ? TextDecoration.lineThrough : null,
-                          decorationColor: Color(0xFF4A5568),
-                        ),
-                      ),
-                      if (variant.isNotEmpty && variant['name'] != null) ...[
-                        SizedBox(height: 2),
-                        Text(
-                          variant['name'] ?? '',
-                          style: TextStyle(color: Color(0xFF6C63FF), fontSize: 11, fontWeight: FontWeight.w500),
-                        ),
-                      ],
-                      SizedBox(height: 4),
-                      Text(
-                        "${qty % 1 == 0 ? qty.toInt() : qty} ${variant['unit'] ?? ''} × Rp ${_formatPrice(price)}",
-                        style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                Text(
-                  "Rp ${_formatPrice(lineTotal)}",
-                  style: TextStyle(
-                    color: isPrepared ? Color(0xFF4A5568) : Color(0xFF10B981),
-                    fontSize: 13, fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
+                Text("Rp ${CurrencyUtils.formatPrice(qty * price)}", style: TextStyle(
+                  color: isPrepared ? Color(0xFF4A5568) : Color(0xFF10B981),
+                  fontSize: 12, fontWeight: FontWeight.w700)),
+              ]),
             ),
           );
         }),
-
-        SizedBox(height: 8),
-
-        // Price summary
-        Container(
-          padding: EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Color(0xFF0F1117),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Color(0xFF222840), width: 1),
-          ),
-          child: Column(
-            children: [
-              _summaryRow("Subtotal", "Rp ${_formatPrice(subtotal)}",
-                  valueColor: Colors.white),
-              if (isDelivery) ...[
-                SizedBox(height: 10),
-                _summaryRow("Delivery fee", "Rp ${_formatPrice(delivery)}",
-                    valueColor: Color(0xFF06B6D4)),
-              ],
-              SizedBox(height: 12),
-              Divider(color: Color(0xFF222840), height: 1),
-              SizedBox(height: 12),
-              _summaryRow(
-                "Total",
-                "Rp ${_formatPrice(total)}",
-                labelStyle: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w800),
-                valueColor: _amber,
-                valueFontSize: 16,
-              ),
-            ],
-          ),
-        ),
       ],
-    );
+
+      Container(
+        margin: EdgeInsets.fromLTRB(14, 4, 14, 14),
+        padding: EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Color(0xFF0F1117),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Color(0xFF222840), width: 1),
+        ),
+        child: Column(children: [
+          _totalRow("Subtotal",     subtotal, Color(0xFFCBD5E1)),
+          SizedBox(height: 8),
+          _totalRow("Delivery fee", delivery, _cyan),
+          Padding(padding: EdgeInsets.symmetric(vertical: 8),
+            child: Divider(color: Color(0xFF222840), height: 1)),
+          _totalRow("Total", total, _amber, large: true),
+        ]),
+      ),
+    ]);
   }
 
-  Widget _summaryRow(String label, String value, {
-    Color valueColor = Colors.white,
-    TextStyle? labelStyle,
-    double valueFontSize = 13,
-  }) {
+  Widget _totalRow(String label, double amount, Color valueColor, {bool large = false}) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: labelStyle ?? TextStyle(color: Color(0xFF64748B), fontSize: 13)),
-        Text(value, style: TextStyle(
-          color: valueColor, fontSize: valueFontSize, fontWeight: FontWeight.w700,
-        )),
+        Text(label, style: TextStyle(
+          color: large ? Colors.white : Color(0xFF64748B),
+          fontSize: large ? 14 : 12,
+          fontWeight: large ? FontWeight.w800 : FontWeight.w500)),
+        Text("Rp ${CurrencyUtils.formatPrice(amount)}", style: TextStyle(
+          color: valueColor, fontSize: large ? 15 : 12, fontWeight: FontWeight.w800)),
       ],
     );
-  }
-
-  String _capitalize(String s) {
-    if (s.isEmpty) return s;
-    return s[0].toUpperCase() + s.substring(1);
   }
 }

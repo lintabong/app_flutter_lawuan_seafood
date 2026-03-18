@@ -43,7 +43,12 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
 
   Future _load() async {
     setState(() { loading = true; selectedOrderIndex = null; });
-    final data = await SupabaseService.getDeliveryOrders(date: selectedDate);
+    final data = await SupabaseService.getOrders(
+      date: selectedDate,
+      deliveryType: 'delivery',
+      withItems: true,
+      pageSize: 100,
+    );
     setState(() { orders = data; loading = false; });
     if (orders.isNotEmpty) {
       final first = _firstWithCoords();
@@ -88,32 +93,24 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
     }
   }
 
-  // ── Status change ────────────────────────────────────────
-  Future _changeStatus(BuildContext context, int oi, String newStatus) async {
-    final order      = orders[oi];
-    final orderId    = order['id'] as int;
-    final oldStatus  = order['status'] as String;
+    Future _changeStatus(BuildContext context, int oi, String newStatus) async {
+    final order     = orders[oi];
+    final orderId   = order['id'] as int;
+    final oldStatus = order['status'] as String;
     if (oldStatus == newStatus || _updatingOrders.contains(orderId)) return;
+
     setState(() => _updatingOrders.add(orderId));
     try {
-      if (_requiresRpc(oldStatus, newStatus)) {
-        final total    = double.tryParse(order['total_amount']?.toString()   ?? '0') ?? 0;
-        final delivery = double.tryParse(order['delivery_price']?.toString() ?? '0') ?? 0;
-        await SupabaseService.applyOrderStatusWithCashInflow(
-          orderId:        orderId,
-          newStatus:      newStatus,
-          totalAmount:    total,
-          deliveryAmount: delivery,
-        );
-      } else {
-        await SupabaseService.updateOrderStatus(orderId: orderId, status: newStatus);
-      }
+      await SupabaseService.updateOrderStatusRpc(
+        orderId:   orderId,
+        newStatus: newStatus,
+      );
       setState(() => orders[oi]['status'] = newStatus);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text("Failed to update: $e"),
-          backgroundColor: Color(0xFF2D0A0A),
+          content:         Text('Failed to update: $e'),
+          backgroundColor: const Color(0xFF2D0A0A),
         ));
       }
     } finally {
@@ -320,7 +317,6 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
   }
 
   // ── Root build ────────────────────────────────────────────
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -343,7 +339,8 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
                   children: [
                     TileLayer(
                       urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.app',
+                      userAgentPackageName: 'app_flutter_lawuan_seafood',
+                      maxZoom: 19,
                       tileBuilder: (ctx, tile, _) => ColorFiltered(
                         colorFilter: ColorFilter.matrix([
                           0.30, 0.0, 0.0, 0, 20,
@@ -409,7 +406,7 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
                 child: Container(
                   padding: EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                   decoration: BoxDecoration(color: Color(0xAA000000), borderRadius: BorderRadius.circular(4)),
-                  child: Text("© OpenStreetMap", style: TextStyle(color: Colors.white70, fontSize: 9)),
+                  child: Text("© OpenStreetMap contributors", style: TextStyle(color: Colors.white70, fontSize: 9)),
                 ),
               ),
             ]),
@@ -477,10 +474,13 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
   }
 
   // ── Card ─────────────────────────────────────────────────
-
   Widget _buildCard(BuildContext context, int oi) {
     final o          = orders[oi];
     final orderId    = o['id'] as int;
+    final orderDate = DateTime.tryParse(o['order_date']?.toString() ?? '');
+    final orderTime = orderDate != null
+        ? "${orderDate.toLocal().hour.toString().padLeft(2, '0')}:${orderDate.toLocal().minute.toString().padLeft(2, '0')}"
+        : "--:--";
     final customer   = o['customers'] as Map? ?? {};
     final items      = (o['order_items'] as List?) ?? [];
     final isSelected = selectedOrderIndex == oi;
@@ -538,6 +538,11 @@ class _DeliveryOrderPageState extends State<DeliveryOrderPage> {
                           Text("#$orderId", style: TextStyle(
                             color: _amber, fontSize: 12, fontWeight: FontWeight.w700)),
                           SizedBox(width: 6),
+                          Text(orderTime, style: TextStyle(
+                            color: Color(0xFF64748B),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          )),
                           if (hasCoords) Container(
                             padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(color: _cyanBg, borderRadius: BorderRadius.circular(5)),
