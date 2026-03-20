@@ -1,5 +1,7 @@
 
 import 'package:flutter/material.dart';
+import '../services/supabase_service.dart';
+import '../pages/cash_out_page.dart';
 import 'create_order_page.dart';
 import 'customers_page.dart';
 import 'delivery_order_page.dart';
@@ -8,19 +10,56 @@ import 'product_page.dart';
 import 'purchase_product.dart';
 import 'transaction_page.dart';
 
+import '../helpers/currency_utils.dart';
 
-class MainMenu extends StatelessWidget {
-    final List<Map<String, dynamic>> menus = [
-      {"title": "Orders", "icon": Icons.receipt_long_rounded, "color": Color(0xFFF59E0B), "bg": Color(0xFF2D1F0A)},
-      {"title": "Delivery Orders", "icon": Icons.local_shipping_rounded, "color": Color(0xFF3B82F6), "bg": Color(0xFF0B1D3A)},
-      {"title": "Products", "icon": Icons.inventory_2_rounded, "color": Color(0xFF6C63FF), "bg": Color(0xFF1E1B4B)},
-      {"title": "Customers", "icon": Icons.people_alt_rounded, "color": Color(0xFF06B6D4), "bg": Color(0xFF0C2A3A)},
-      {"title": "Create Order", "icon": Icons.add_circle_rounded, "color": Color(0xFF10B981), "bg": Color(0xFF062318)},
-      {"title": "Transaction", "icon": Icons.account_balance_wallet_rounded, "color": Color(0xFFEC4899), "bg": Color(0xFF2D0A1E)},
-      {"title": "Purchasing", "icon": Icons.shopping_bag_rounded, "color": Color(0xFFF97316), "bg": Color(0xFF2D1200)},
-      {"title": "Report", "icon": Icons.bar_chart_rounded, "color": Color(0xFF8B5CF6), "bg": Color(0xFF1C1030)},
-      {"title": "Settings", "icon": Icons.tune_rounded, "color": Color(0xFF94A3B8), "bg": Color(0xFF1A1F2E)},
-    ];
+class MainMenu extends StatefulWidget {
+  @override
+  State<MainMenu> createState() => _MainMenuState();
+}
+
+class _MainMenuState extends State<MainMenu> {
+  String _revenue = 'Rp 0';
+  int _variantCount = 0;
+  bool _loading = true;
+
+  final List<Map<String, dynamic>> menus = [
+    {'title': 'Orders', 'icon': Icons.receipt_long_rounded, 'color': Color(0xFFF59E0B), 'bg': Color(0xFF2D1F0A)},
+    {'title': 'Delivery Orders', 'icon': Icons.local_shipping_rounded, 'color': Color(0xFF3B82F6), 'bg': Color(0xFF0B1D3A)},
+    {'title': 'Create Order', 'icon': Icons.add_circle_rounded, 'color': Color(0xFF10B981), 'bg': Color(0xFF062318)},
+    {'title': 'Products', 'icon': Icons.inventory_2_rounded, 'color': Color(0xFF6C63FF), 'bg': Color(0xFF1E1B4B)},
+    {'title': 'Customers', 'icon': Icons.people_alt_rounded, 'color': Color(0xFF06B6D4), 'bg': Color(0xFF0C2A3A)},
+    {'title': 'Transaction', 'icon': Icons.account_balance_wallet_rounded, 'color': Color(0xFFEC4899), 'bg': Color(0xFF2D0A1E)},
+    {'title': 'Product Purchase', 'icon': Icons.shopping_bag_rounded, 'color': Color(0xFFF97316), 'bg': Color(0xFF2D1200)},
+    {'title': 'Cash Out', 'icon': Icons.money_off_csred_rounded, 'color': Color(0xFFEF4444), 'bg': Color(0xFF2A0B0B)},
+    {'title': 'Report', 'icon': Icons.bar_chart_rounded, 'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030)},
+    {'title': 'Settings', 'icon': Icons.tune_rounded, 'color': Color(0xFF94A3B8), 'bg': Color(0xFF1A1F2E)},
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchDashboardData();
+  }
+
+  Future<void> _fetchDashboardData() async {
+    try {
+      final results = await Future.wait([
+        SupabaseService.getCashBalance(1),
+        SupabaseService.getActiveVariantCount(),
+      ]);
+
+      final balance = results[0] as double;
+      final variantCount = results[1] as int;
+
+      setState(() {
+        _revenue = CurrencyUtils.formatRupiah(balance);
+        _variantCount = variantCount;
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() => _loading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,7 +113,6 @@ class MainMenu extends StatelessWidget {
                       ],
                     ),
                     SizedBox(height: 28),
-                    // Summary strip
                     Container(
                       padding: EdgeInsets.all(18),
                       decoration: BoxDecoration(
@@ -92,16 +130,25 @@ class MainMenu extends StatelessWidget {
                           ),
                         ],
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceAround,
-                        children: [
-                          _buildStat('Orders', '128'),
-                          _buildDivider(),
-                          _buildStat('Revenue', "Rp 4.2M"),
-                          _buildDivider(),
-                          _buildStat('Products', "54"),
-                        ],
-                      ),
+                      child: _loading
+                          ? Center(
+                              child: SizedBox(
+                                height: 24,
+                                width: 24,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceAround,
+                              children: [
+                                _buildStat('Current Cash', _revenue),
+                                _buildDivider(),
+                                _buildStat('Variants', '$_variantCount'),
+                              ],
+                            ),
                     ),
                     SizedBox(height: 28),
                     Text(
@@ -194,10 +241,12 @@ class _MenuCardState extends State<_MenuCard> with SingleTickerProviderStateMixi
       Navigator.push(context, MaterialPageRoute(builder: (_) => DeliveryOrderPage()));
     } else if (title == 'Create Order') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => CreateOrderPage()));
-    } else if (title == 'Purchasing') {
+    } else if (title == 'Product Purchase') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => ProductPurchasePage()));
     } else if (title == 'Customers') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => CustomerPage()));
+    } else if (title == 'Cash Out') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => CashOutPage()));
     }
   }
 
@@ -244,13 +293,13 @@ class _MenuCardState extends State<_MenuCard> with SingleTickerProviderStateMixi
                   color: bg,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Icon(widget.menu["icon"], color: color, size: 22),
+                child: Icon(widget.menu['icon'], color: color, size: 22),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    widget.menu["title"],
+                    widget.menu['title'],
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 14,
@@ -262,7 +311,7 @@ class _MenuCardState extends State<_MenuCard> with SingleTickerProviderStateMixi
                   Row(
                     children: [
                       Text(
-                        "Open",
+                        'Open',
                         style: TextStyle(
                           color: color,
                           fontSize: 11,

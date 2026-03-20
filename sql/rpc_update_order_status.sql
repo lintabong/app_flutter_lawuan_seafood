@@ -2,7 +2,8 @@ create or replace function update_order_status(
     p_order_id bigint,
     p_new_status varchar,
     p_cash_id bigint default 1,
-    p_user uuid default null
+    p_user uuid default null,
+    p_paid_at timestamptz default now()
 )
 returns table(
     order_id bigint,
@@ -16,11 +17,10 @@ declare
     v_total numeric;
     v_transaction_id bigint;
     v_cash_balance numeric;
-    v_order_date timestamptz;
 begin
 
     select status, total_amount, order_date
-    into v_old_status, v_total, v_order_date
+    into v_old_status, v_total
     from orders
     where id = p_order_id
     for update;
@@ -40,8 +40,7 @@ begin
     end if;
 
     -- PAYMENT EVENT
-    if v_old_status in ('pending', 'prepared')
-    and p_new_status in ('paid', 'picked up' ,'delivered') then
+    if v_old_status in ('pending', 'prepared') and p_new_status in ('paid', 'picked up' ,'delivered') then
 
         -- Prevent duplicate financial entry
         if exists(
@@ -78,7 +77,7 @@ begin
             p_order_id,
             v_total,
             p_user,
-            v_order_date
+            p_paid_at
         )
         returning id into v_transaction_id;
 
@@ -96,7 +95,6 @@ begin
 
     -- CANCEL PAID ORDER
     if v_old_status in ('paid','picked up','delivered') and p_new_status = 'cancelled' then
-
         select id
         into v_transaction_id
         from transactions

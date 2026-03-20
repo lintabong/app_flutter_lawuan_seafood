@@ -6,7 +6,24 @@ class SupabaseService {
 
   static String? get currentUserId => supabase.auth.currentUser?.id;
 
-  // ── Products ──────────────────────────────────────────────
+  static Future<double> getCashBalance(int cashId) async {
+    final res = await supabase
+        .from('cash')
+        .select('balance')
+        .eq('id', cashId)
+        .single();
+
+    return (res['balance'] as num).toDouble();
+  }
+
+  static Future<int> getActiveVariantCount() async {
+    final res = await supabase
+        .from('product_variants')
+        .select('id, products!inner(is_active)')
+        .eq('products.is_active', true);
+
+    return (res as List).length;
+  }
 
   static Future<List<dynamic>> getProducts() async {
     final response = await supabase
@@ -72,9 +89,9 @@ class SupabaseService {
     required double buyPrice,
   }) async {
     await supabase.from('product_variants').update({
-      'stock':      stock,
+      'stock': stock,
       'sell_price': sellPrice,
-      'buy_price':  buyPrice,
+      'buy_price': buyPrice,
     }).eq('id', variantId);
   }
 
@@ -105,6 +122,29 @@ class SupabaseService {
         .eq('is_active', true)
         .order('name');
     return response;
+  }
+
+  static Future<Map<String, dynamic>> expenseTransaction({
+    required String categoryName,
+    required double amount,
+    required String status,
+    required String description,
+    required DateTime transactionDate,
+    int cashId = 1,
+  }) async {
+    final response = await supabase.rpc(
+      'expense_transaction',
+      params: {
+        'p_category_name': categoryName,
+        'p_amount': amount,
+        'p_cash_id': cashId,
+        'p_description': description,
+        'p_status': status,
+        'p_created_by': currentUserId,
+        'p_transaction_date': transactionDate.toUtc().toIso8601String(),
+      },
+    );
+    return Map<String, dynamic>.from(response.first);
   }
 
   static Future<Map<String, dynamic>> productPurchaseTransaction({
@@ -182,7 +222,7 @@ class SupabaseService {
         ,order_items(
           id, quantity, sell_price, is_prepared,
           products(id, name, unit),
-          product_variants(id, name)
+          product_variants(id, product_id, name, unit, buy_price, sell_price, stock)
         )
       ''';
     }
@@ -281,7 +321,7 @@ class SupabaseService {
         .eq('id', orderId);
   }
 
-    static Future<List<dynamic>> getTransactions({required DateTime date}) async {
+  static Future<List<dynamic>> getTransactions({required DateTime date}) async {
     final start = DateTime(date.year, date.month, date.day, 0, 0, 0).toUtc();
     final end = DateTime(date.year, date.month, date.day, 23, 59, 59).toUtc();
 
@@ -304,7 +344,7 @@ class SupabaseService {
         ''')
         .gte('transaction_date', start.toIso8601String())
         .lte('transaction_date', end.toIso8601String())
-        .inFilter('status', ['draft', 'posted'])
+        .inFilter('status', ['partial', 'draft', 'posted'])
         .order('transaction_date', ascending: false);
 
     if (transactions.isEmpty) return [];

@@ -13,6 +13,7 @@ class OrderConstants {
     'prepared',
     'paid',
     'delivered',
+    'picked up',
     'cancelled',
   ];
 }
