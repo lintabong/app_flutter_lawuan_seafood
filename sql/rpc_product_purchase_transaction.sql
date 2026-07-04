@@ -1,3 +1,4 @@
+
 create or replace function product_purchase_transaction(
     p_cash_id bigint,
     p_supplier_id bigint,
@@ -25,6 +26,7 @@ declare
     v_price numeric;
     v_subtotal numeric;
     v_new_balance numeric := 0;
+    v_variant_id bigint;
 begin
 
     -- Get category
@@ -80,10 +82,9 @@ begin
     )
     returning id into v_transaction_id;
 
-    -- 3. Second loop: insert items
+    -- 3. Second loop: insert items + update stock di variant DEFAULT
     for v_item in select * from jsonb_array_elements(p_items)
     loop
-
         v_product_id := (v_item->>'product_id')::bigint;
         v_qty := (v_item->>'quantity')::numeric;
         v_price := (v_item->>'price')::numeric;
@@ -106,10 +107,22 @@ begin
             v_subtotal
         );
 
-        -- Update stock
-        update products
+        -- lock + ambil id variant default
+        select id into v_variant_id
+        from product_variants
+        where product_id = v_product_id
+          and name = 'default'
+        for update;
+
+        if v_variant_id is null then
+            raise exception
+                'Product % does not have a "default" variant', v_product_id;
+        end if;
+
+        -- Update stock ke variant default (products.stock diabaikan)
+        update product_variants
         set stock = stock + v_qty
-        where id = v_product_id;
+        where id = v_variant_id;
 
     end loop;
 

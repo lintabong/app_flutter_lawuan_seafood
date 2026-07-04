@@ -1,7 +1,11 @@
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../services/supabase_service.dart';
 import '../pages/cash_out_page.dart';
+import 'convert_variant_page.dart';
+import 'convert_product_page.dart';
 import 'create_order_page.dart';
 import 'customers_page.dart';
 import 'delivery_order_page.dart';
@@ -9,6 +13,7 @@ import 'order_page.dart';
 import 'product_page.dart';
 import 'purchase_product.dart';
 import 'transaction_page.dart';
+import 'report_page.dart';
 
 import '../helpers/currency_utils.dart';
 
@@ -19,8 +24,10 @@ class MainMenu extends StatefulWidget {
 
 class _MainMenuState extends State<MainMenu> {
   String _revenue = 'Rp 0';
-  int _variantCount = 0;
+  String _totalStockKg = '0 kg';
   bool _loading = true;
+
+  Timer? _refreshTimer;
 
   final List<Map<String, dynamic>> menus = [
     {'title': 'Orders', 'icon': Icons.receipt_long_rounded, 'color': Color(0xFFF59E0B), 'bg': Color(0xFF2D1F0A)},
@@ -31,6 +38,8 @@ class _MainMenuState extends State<MainMenu> {
     {'title': 'Transaction', 'icon': Icons.account_balance_wallet_rounded, 'color': Color(0xFFEC4899), 'bg': Color(0xFF2D0A1E)},
     {'title': 'Product Purchase', 'icon': Icons.shopping_bag_rounded, 'color': Color(0xFFF97316), 'bg': Color(0xFF2D1200)},
     {'title': 'Cash Out', 'icon': Icons.money_off_csred_rounded, 'color': Color(0xFFEF4444), 'bg': Color(0xFF2A0B0B)},
+    {'title': 'Convert Variant', 'icon': Icons.inventory_rounded, 'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030)},
+    {'title': 'Convert Product', 'icon': Icons.inventory_rounded, 'color': Color.fromARGB(255, 92, 246, 179), 'bg': Color(0xFF1C1030)},
     {'title': 'Report', 'icon': Icons.bar_chart_rounded, 'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030)},
     {'title': 'Settings', 'icon': Icons.tune_rounded, 'color': Color(0xFF94A3B8), 'bg': Color(0xFF1A1F2E)},
   ];
@@ -39,25 +48,50 @@ class _MainMenuState extends State<MainMenu> {
   void initState() {
     super.initState();
     _fetchDashboardData();
+
+    // Auto refresh tiap 8 detik (silent — tidak menampilkan spinner)
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => _fetchDashboardData(silent: true),
+    );
   }
 
-  Future<void> _fetchDashboardData() async {
+  @override
+  void dispose() {
+    // Wajib: hentikan timer saat page ditutup, kalau tidak,
+    // fetch akan terus jalan di background selamanya (memory leak).
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  String _formatKg(double kg) {
+    final s = kg % 1 == 0 ? kg.toInt().toString() : kg.toStringAsFixed(2);
+    return '$s kg';
+  }
+
+  Future<void> _fetchDashboardData({bool silent = false}) async {
     try {
       final results = await Future.wait([
         SupabaseService.getCashBalance(1),
-        SupabaseService.getActiveVariantCount(),
+        SupabaseService.getTotalStockKg(),
       ]);
 
-      final balance = results[0] as double;
-      final variantCount = results[1] as int;
+      final balance = results[0];
+      final totalKg = results[1];
+
+      // mounted check penting: timer bisa fire setelah page ditutup
+      if (!mounted) return;
 
       setState(() {
         _revenue = CurrencyUtils.formatRupiah(balance);
-        _variantCount = variantCount;
+        _totalStockKg = _formatKg(totalKg);
         _loading = false;
       });
     } catch (e) {
-      setState(() => _loading = false);
+      if (!mounted) return;
+      // Saat silent refresh gagal (mis. koneksi putus sebentar),
+      // biarkan angka lama tetap tampil, jangan reset ke loading.
+      if (!silent) setState(() => _loading = false);
     }
   }
 
@@ -146,7 +180,7 @@ class _MainMenuState extends State<MainMenu> {
                               children: [
                                 _buildStat('Current Cash', _revenue),
                                 _buildDivider(),
-                                _buildStat('Variants', '$_variantCount'),
+                                _buildStat('Total Stock', _totalStockKg),
                               ],
                             ),
                     ),
@@ -247,6 +281,12 @@ class _MenuCardState extends State<_MenuCard> with SingleTickerProviderStateMixi
       Navigator.push(context, MaterialPageRoute(builder: (_) => CustomerPage()));
     } else if (title == 'Cash Out') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => CashOutPage()));
+    } else if (title == 'Convert Variant') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => ConvertVariantPage()));
+    }else if (title == 'Convert Product') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => ConvertProductPage()));
+    } else if (title == 'Report') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => ReportPage()));
     }
   }
 

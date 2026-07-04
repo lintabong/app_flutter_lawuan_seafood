@@ -1449,7 +1449,7 @@ class _ProductPickerSheetState extends State<_ProductPickerSheet> {
             ),
             _qtyBtn(Icons.add_rounded, () {
               setState(() {
-                _qty = double.parse((_qty + 1).toStringAsFixed(2));
+                _qty = double.parse((_qty + 0.01).toStringAsFixed(2));
                 _qtyCtrl.text = _qty % 1 == 0
                     ? _qty.toInt().toString()
                     : _qty.toStringAsFixed(2);

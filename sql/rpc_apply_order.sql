@@ -83,9 +83,7 @@ begin
     )
     returning id into v_order_id;
 
-    -- =========================
-    -- INSERT ORDER ITEMS
-    -- =========================
+    -- Insert Order Items
     insert into order_items(
         order_id,
         product_id,
@@ -109,10 +107,8 @@ begin
         sell_price numeric
     );
 
-    -- =========================
-    -- IF PAID
-    -- =========================
-    if p_status in ('paid','picked up','delivered') then
+    -- If paid/picked up/delivered
+    if p_status in ('paid', 'picked up', 'delivered') then
 
         -- reduce stock
         update product_variants pv

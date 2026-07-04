@@ -34,6 +34,68 @@ class SupabaseService {
     return response;
   }
 
+  static Future<List<dynamic>> getProductsWithVariants() async {
+    final response = await supabase
+        .from('products')
+        .select('''
+          id, name, unit, sell_price, category_id, is_active,
+          product_variants(
+            id, product_id, name, unit,
+            buy_price, sell_price, stock,
+            conversion_factor, is_active
+          )
+        ''')
+        .eq('is_active', true)
+        .order('name');
+    return response;
+  }
+
+  /// Edit product ATAU variant 'default' — dua-duanya sinkron
+  /// lewat 1 RPC (lihat update_product_rpc.sql).
+  static Future<void> updateProductWithDefaultVariant({
+    required int productId,
+    required double stock,
+    required double sellPrice,
+    required double buyPrice,
+  }) async {
+    await supabase.rpc(
+      'update_product_with_default_variant',
+      params: {
+        'p_product_id': productId,
+        'p_stock': stock,
+        'p_sell_price': sellPrice,
+        'p_buy_price': buyPrice,
+      },
+    );
+  }
+
+  /// Create product baru + variant default sekaligus.
+  /// Return: product id baru.
+  static Future<int> insertProductWithDefaultVariant({
+    required String name,
+    required int categoryId,
+    required String unit,
+    required double buyPrice,
+    required double sellPrice,
+    required double stock,
+  }) async {
+    final response = await supabase.rpc(
+      'insert_product_with_default_variant',
+      params: {
+        'p_name': name,
+        'p_category_id': categoryId,
+        'p_unit': unit.isNotEmpty ? unit : 'kg',
+        'p_buy_price': buyPrice,
+        'p_sell_price': sellPrice,
+        'p_stock': stock,
+      },
+    );
+    return (response as num).toInt();
+  }
+
+  /// GANTIKAN insertProductVariant lama dengan versi ini —
+  /// sekarang ikut menyimpan conversion_factor (dipakai fitur
+  /// Convert Variant; default 1 kalau tidak diisi).
   static Future<Map<String, dynamic>> insertProductVariant({
     required int productId,
     required String name,
@@ -41,19 +103,22 @@ class SupabaseService {
     required double stock,
     required double sellPrice,
     required double buyPrice,
+    double conversionFactor = 1,
   }) async {
     final response = await supabase
         .from('product_variants')
         .insert({
           'product_id': productId,
-          'name':       name,
-          'unit':       unit.isNotEmpty ? unit : null,
-          'stock':      stock,
+          'name': name,
+          'unit': unit.isNotEmpty ? unit : null,
+          'stock': stock,
           'sell_price': sellPrice,
-          'buy_price':  buyPrice,
-          'is_active':  true,
+          'buy_price': buyPrice,
+          'conversion_factor': conversionFactor,
+          'is_active': true,
         })
-        .select('id, product_id, name, unit, buy_price, sell_price, stock, is_active')
+        .select(
+            'id, product_id, name, unit, buy_price, sell_price, stock, conversion_factor, is_active')
         .single();
     return response;
   }
@@ -425,5 +490,225 @@ class SupabaseService {
     }).toList();
 
     return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+// TAMBAHAN UNTUK lib/services/supabase_service.dart
+// Copy method-method di bawah ini ke dalam class SupabaseService.
+// ═══════════════════════════════════════════════════════════════════
+
+  // ── Variant Conversion ────────────────────────────────────
+
+  /// Products + semua variant lengkap dengan stock & conversion_factor.
+  /// Dipakai oleh halaman converter (getProducts() yang lama tidak
+  /// mengambil stock & conversion_factor, jadi dibuat terpisah agar
+  /// tidak mengganggu halaman lain).
+  static Future<List<dynamic>> getProductsForConversion() async {
+    final response = await supabase
+        .from('products')
+        .select('''
+          id, name, unit,
+          product_variants(
+            id, name, unit, stock, conversion_factor, is_active
+          )
+        ''')
+        .eq('is_active', true)
+        .order('name');
+    return response;
+  }
+
+  /// Panggil RPC convert_product_variant.
+  ///
+  /// direction:
+  ///   'pack'   → default berkurang (qty × factor), variant bertambah qty
+  ///   'unpack' → variant berkurang qty, default bertambah (qty × factor)
+  ///
+  /// Return: { ledger_id, default_stock, variant_stock }
+  static Future<Map<String, dynamic>> convertProductVariant({
+    required int productId,
+    required int variantId,
+    required double quantity,
+    String direction = 'pack',
+    String? note,
+  }) async {
+    final response = await supabase.rpc(
+      'convert_product_variant',
+      params: {
+        'p_product_id': productId,
+        'p_variant_id': variantId,
+        'p_quantity': quantity,
+        'p_direction': direction,
+        'p_note': (note != null && note.trim().isNotEmpty) ? note.trim() : null,
+        'p_created_by': currentUserId,
+      },
+    );
+
+    if (response == null || (response as List).isEmpty) {
+      throw Exception('No response from convert_product_variant');
+    }
+
+    return Map<String, dynamic>.from(response.first);
+  }
+
+  /// Riwayat konversi dari variant_conversion_ledger.
+  /// productId null = semua product.
+  ///
+  /// Nama FK mengikuti auto-naming Postgres dari definisi table:
+  ///   variant_conversion_ledger_from_variant_id_fkey
+  ///   variant_conversion_ledger_to_variant_id_fkey
+  static Future<List<dynamic>> getConversionLedger({
+    int? productId,
+    int limit = 20,
+  }) async {
+    var query = supabase.from('variant_conversion_ledger').select('''
+      id, quantity, conversion_factor, base_qty, note, created_at,
+      products(id, name, unit),
+      from_variant:product_variants!variant_conversion_ledger_from_variant_id_fkey(id, name),
+      to_variant:product_variants!variant_conversion_ledger_to_variant_id_fkey(id, name)
+    ''');
+
+    if (productId != null) {
+      query = query.eq('product_id', productId);
+    }
+
+    final response = await query
+        .order('created_at', ascending: false)
+        .limit(limit);
+
+    return response;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+// TAMBAHAN UNTUK lib/services/supabase_service.dart
+// Dipakai oleh KEDUA opsi (full file maupun yang dipisah).
+// Copy method ini ke dalam class SupabaseService.
+// getActiveVariantCount() boleh dihapus kalau sudah tidak dipakai
+// halaman lain.
+// ═══════════════════════════════════════════════════════════════════
+
+  /// Total stock setara kg dari semua variant aktif (product aktif).
+  /// Rumus: SUM(stock × conversion_factor).
+  ///
+  /// Variant 'default' punya factor 1, jadi otomatis ikut terhitung
+  /// apa adanya. Contoh: default 4 kg + 6 cup 500gr (factor 0.5)
+  /// = 4 + 3 = 7 kg.
+  ///
+  /// Dihitung di sisi client karena jumlah variant masih kecil.
+  /// Kalau nanti sudah ribuan baris, pindahkan ke RPC agregat di
+  /// Postgres agar hanya 1 angka yang dikirim lewat network.
+  static Future<double> getTotalStockKg() async {
+    final res = await supabase
+        .from('product_variants')
+        .select('stock, conversion_factor, products!inner(is_active)')
+        .eq('is_active', true)
+        .eq('products.is_active', true);
+
+    double total = 0;
+    for (final row in (res as List)) {
+      final stock =
+          double.tryParse(row['stock']?.toString() ?? '0') ?? 0;
+      final factor =
+          double.tryParse(row['conversion_factor']?.toString() ?? '1') ?? 1;
+      total += stock * factor;
+    }
+    return total;
+  }
+
+  // ── Reports ──────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> getSalesSummary({
+    required DateTime start,
+    required DateTime end,
+  }) async {
+    final res = await supabase.rpc('report_sales_summary', params: {
+      'p_start': start.toUtc().toIso8601String(),
+      'p_end': end.toUtc().toIso8601String(),
+    });
+
+    final list = res as List;
+    if (list.isEmpty) {
+      return {
+        'order_count': 0,
+        'items_revenue': 0,
+        'delivery_revenue': 0,
+        'total_revenue': 0,
+        'total_cogs': 0,
+        'gross_profit': 0,
+        'total_expense': 0,
+        'total_purchase': 0,
+      };
+    }
+    return Map<String, dynamic>.from(list.first as Map);
+  }
+
+  static Future<List<dynamic>> getProductSales({
+    required DateTime start,
+    required DateTime end,
+  }) async {
+    final res = await supabase.rpc('report_product_sales', params: {
+      'p_start': start.toUtc().toIso8601String(),
+      'p_end': end.toUtc().toIso8601String(),
+    });
+    return res as List;
+  }
+  
+  /// Products + variant lengkap dengan buy_price — dipakai halaman
+  /// product conversion (perlu buy_price untuk preview WAC).
+  static Future<List<dynamic>> getProductsForProductConversion() async {
+    final response = await supabase
+        .from('products')
+        .select('''
+          id, name, unit,
+          product_variants(
+            id, name, unit, stock, buy_price,
+            conversion_factor, is_active
+          )
+        ''')
+        .eq('is_active', true)
+        .order('name');
+    return response;
+  }
+
+  /// RPC convert_product.
+  /// Return: { ledger_id, from_stock, to_stock, new_avg_cost }
+  static Future<Map<String, dynamic>> convertProduct({
+    required int fromProductId,
+    required int toProductId,
+    required double qtyFrom,
+    required double qtyTo,
+    String? note,
+  }) async {
+    final response = await supabase.rpc(
+      'convert_product',
+      params: {
+        'p_from_product_id': fromProductId,
+        'p_to_product_id': toProductId,
+        'p_qty_from': qtyFrom,
+        'p_qty_to': qtyTo,
+        'p_note':
+            (note != null && note.trim().isNotEmpty) ? note.trim() : null,
+        'p_created_by': currentUserId,
+      },
+    );
+    if (response == null || (response as List).isEmpty) {
+      throw Exception('No response from convert_product');
+    }
+    return Map<String, dynamic>.from(response.first);
+  }
+
+  /// Riwayat konversi product terakhir.
+  static Future<List<dynamic>> getProductConversionLedger(
+      {int limit = 10}) async {
+    final response = await supabase
+        .from('product_conversion_ledger')
+        .select('''
+          id, qty_from, qty_to, unit_cost, total_value,
+          new_avg_cost, note, created_at,
+          from_product:products!product_conversion_ledger_from_product_id_fkey(id, name),
+          to_product:products!product_conversion_ledger_to_product_id_fkey(id, name)
+        ''')
+        .order('created_at', ascending: false)
+        .limit(limit);
+    return response;
   }
 }
