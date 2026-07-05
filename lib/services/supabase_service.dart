@@ -711,4 +711,89 @@ class SupabaseService {
         .limit(limit);
     return response;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+// TAMBAHKAN method ini ke dalam class SupabaseService.
+// Pola mengikuti createOrder / updateOrderStatusRpc yang sudah ada.
+// ═══════════════════════════════════════════════════════════════════════════
+
+static Future<Map<String, dynamic>> editOrder({
+  required int orderId,
+  required List<Map<String, dynamic>> items,
+  required double deliveryPrice,
+  required String deliveryType,
+  required DateTime orderDate,
+}) async {
+  final response = await supabase.rpc('edit_order', params: {
+    'p_order_id': orderId,
+    'p_items': items,
+    'p_delivery_price': deliveryPrice,
+    'p_delivery_type': deliveryType,
+    // Kirim UTC ISO string — konsisten dgn apply_order yg pakai timestamptz.
+    'p_order_date': orderDate.toUtc().toIso8601String(),
+  });
+
+  // RPC returns table(order_id, total_amount) -> Supabase gives a List.
+  if (response is List && response.isNotEmpty) {
+    return Map<String, dynamic>.from(response.first as Map);
+  }
+  if (response is Map) {
+    return Map<String, dynamic>.from(response);
+  }
+  return {'order_id': orderId};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PENTING — pastikan getOrders(withItems: true) ikut mengambil field berikut
+// di dalam order_items, karena EditOrderPage butuh untuk seed baris:
+//
+//   order_items (
+//     id, quantity, sell_price, buy_price, is_prepared,
+//     product_id, product_variant_id,
+//     products ( id, name ),
+//     product_variants ( id, name, sell_price, buy_price, unit )
+//   )
+//
+// Kalau select-mu belum menyertakan product_id / product_variant_id secara
+// eksplisit, EditOrderPage tetap punya fallback lewat join products/
+// product_variants, tapi paling aman kedua id itu ikut di-select.
+// ═══════════════════════════════════════════════════════════════════════════
+
+  /// RPC stock_opname.
+  /// items: [{'variant_id': 12, 'physical_stock': 3.5}, ...]
+  /// Return: { session_id, items_adjusted, total_value_diff }
+  static Future<Map<String, dynamic>> stockOpname({
+    required List<Map<String, dynamic>> items,
+    String? note,
+  }) async {
+    final response = await supabase.rpc(
+      'stock_opname',
+      params: {
+        'p_items': items,
+        'p_note':
+            (note != null && note.trim().isNotEmpty) ? note.trim() : null,
+        'p_created_by': currentUserId,
+      },
+    );
+    if (response == null || (response as List).isEmpty) {
+      throw Exception('No response from stock_opname');
+    }
+    return Map<String, dynamic>.from(response.first);
+  }
+
+  /// Riwayat opname terakhir (per item).
+  static Future<List<dynamic>> getStockOpnameLedger(
+      {int limit = 20}) async {
+    final response = await supabase
+        .from('stock_opname_ledger')
+        .select('''
+          id, session_id, stock_before, stock_after, difference,
+          unit_cost, value_diff, note, created_at,
+          products(id, name, unit),
+          product_variants(id, name, unit)
+        ''')
+        .order('created_at', ascending: false)
+        .limit(limit);
+    return response;
+  }
 }

@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import '../../helpers/currency_utils.dart';
 import '../../helpers/date_utils.dart' as AppDateUtils;
@@ -17,6 +18,7 @@ class OrderCard extends StatelessWidget {
   final VoidCallback onTap;
   final void Function(String newStatus) onStatusChanged;
   final VoidCallback onCopyInvoice;
+  final VoidCallback onEdit;
   final void Function(int ii) onToggleItem;
 
   const OrderCard({
@@ -30,6 +32,7 @@ class OrderCard extends StatelessWidget {
     required this.onTap,
     required this.onStatusChanged,
     required this.onCopyInvoice,
+    required this.onEdit,
     required this.onToggleItem,
   });
 
@@ -71,6 +74,9 @@ class OrderCard extends StatelessWidget {
     final total    = double.tryParse(order['total_amount']?.toString()   ?? '0') ?? 0;
     final delivery = double.tryParse(order['delivery_price']?.toString() ?? '0') ?? 0;
     final subtotal = total - delivery;
+
+    // Edit is only meaningful for pending orders (matches edit_order RPC guard).
+    final canEdit = order['status'] == 'pending';
 
     return GestureDetector(
       onTap: onTap,
@@ -301,6 +307,42 @@ class OrderCard extends StatelessWidget {
                         ),
                       ),
                       SizedBox(height: 6),
+
+                      // Edit button — pending only
+                      if (canEdit) ...[
+                        GestureDetector(
+                          onTap: onEdit,
+                          child: Container(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Color(0xFF1E1B4B),
+                              borderRadius: BorderRadius.circular(9),
+                              border: Border.all(
+                                color: Color(0xFF6C63FF).withOpacity(0.3),
+                                width: 1,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.edit_rounded,
+                                    size: 11, color: Color(0xFF6C63FF)),
+                                SizedBox(width: 4),
+                                Text(
+                                  'Edit',
+                                  style: TextStyle(
+                                    color: Color(0xFF6C63FF),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 6),
+                      ],
 
                       // Expand arrow
                       AnimatedRotation(

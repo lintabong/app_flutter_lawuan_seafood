@@ -1,9 +1,9 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/supabase_service.dart';
 import '../helpers/text_utils.dart';
 import '../constants.dart';
+import 'edit_order_page.dart';
 import 'widgets/order_card.dart';
 import 'widgets/order_filter_bar.dart';
 
@@ -114,7 +114,7 @@ class _OrderPageState extends State<OrderPage> {
       context: context,
       initialDate: selectedDate ?? DateTime.now(),
       firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
+      lastDate: DateTime(2100),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
           colorScheme: ColorScheme.dark(
@@ -166,6 +166,19 @@ class _OrderPageState extends State<OrderPage> {
       }
     } finally {
       setState(() => _updatingOrders.remove(orderId));
+    }
+  }
+
+  Future<void> _openEdit(int oi) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => EditOrderPage(order: Map.from(orders[oi])),
+      ),
+    );
+    // Edit page returns a non-null result on successful save.
+    if (result != null) {
+      _load();
     }
   }
 
@@ -338,6 +351,7 @@ class _OrderPageState extends State<OrderPage> {
       },
       onStatusChanged: (newStatus) => _changeStatus(oi, newStatus),
       onCopyInvoice:   () => _copyInvoice(o),
+      onEdit:          () => _openEdit(oi),
       onToggleItem:    (ii) => _toggleItem(oi, ii),
     );
   }

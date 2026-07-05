@@ -3,75 +3,133 @@ import 'package:flutter/services.dart';
 import '../services/supabase_service.dart';
 import './widgets/order_pickers.dart';
 
-class CreateOrderPage extends StatefulWidget {
+// ═══════════════════════════════════════════════════════════════════════════
+// EditOrderPage
+// ───────────────────────────────────────────────────────────────────────────
+// Editing is allowed ONLY for orders that are still 'pending' (enforced again
+// server-side by the edit_order RPC).
+//
+// Editable here: order items (variant/qty/sell price), delivery type,
+//                delivery fee, and order date/time.
+// NOT editable:  customer, status, cash account (hidden).
+// ═══════════════════════════════════════════════════════════════════════════
+class EditOrderPage extends StatefulWidget {
+  /// The full order map (must include 'order_items' with joined
+  /// 'products' & 'product_variants'). Pass the same shape you already
+  /// load in OrderPage with withItems: true.
+  final Map order;
+
+  const EditOrderPage({super.key, required this.order});
+
   @override
-  State<CreateOrderPage> createState() => _CreateOrderPageState();
+  State<EditOrderPage> createState() => _EditOrderPageState();
 }
 
-class _CreateOrderPageState extends State<CreateOrderPage> {
-  // ── Data ─────────────────────────────────────────────────
-  List _customers = [];
+class _EditOrderPageState extends State<EditOrderPage> {
   List _products = [];
-  List _cashes = [];
   bool _loading = true;
+  bool _submitting = false;
 
-  // ── Selections ────────────────────────────────────────────
-  Map<String, dynamic>? _selectedCustomer;
-  Map<String, dynamic>? _selectedCash;
   String _deliveryType = 'pickup';
   double _deliveryPrice = 0;
-  String _status = 'pending';
-
-  /// Order date/time — defaults to now, user can override
-  DateTime _orderDate = DateTime.now();
+  late DateTime _orderDate;
 
   final TextEditingController _deliveryPriceController =
       TextEditingController(text: '0');
-  final TextEditingController _customerSearchCtrl = TextEditingController();
 
   /// Each entry: { product, variant, qty, sell_price }
-  /// qty is stored as double to support 0.01 steps
-  /// sell_price is editable per-item, seeded from variant['sell_price']
   final List<Map<String, dynamic>> _orderItems = [];
 
-  bool _submitting = false;
+  int get _orderId => widget.order['id'] as int;
 
-  // ── Lifecycle ─────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
+
+    // Seed delivery + date from the existing order
+    _deliveryType =
+        (widget.order['delivery_type'] as String?) ?? 'pickup';
+    _deliveryPrice =
+        double.tryParse(widget.order['delivery_price']?.toString() ?? '0') ??
+            0;
+    _deliveryPriceController.text = _deliveryPrice.toInt().toString();
+
+    final parsedDate =
+        DateTime.tryParse(widget.order['order_date']?.toString() ?? '');
+    _orderDate = (parsedDate ?? DateTime.now()).toLocal();
+
     _loadAll();
   }
 
   @override
   void dispose() {
     _deliveryPriceController.dispose();
-    _customerSearchCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _loadAll() async {
-    final results = await Future.wait([
-      SupabaseService.getCustomers(),
-      SupabaseService.getProducts(),
-      _getCashes(),
-    ]);
+    final products = await SupabaseService.getProducts();
+    _seedItemsFromOrder(products);
     setState(() {
-      _customers = results[0];
-      _products = results[1];
-      _cashes = results[2];
-      if (_cashes.isNotEmpty) _selectedCash = _cashes[0];
+      _products = products;
       _loading = false;
     });
   }
 
-  Future<List<dynamic>> _getCashes() async {
-    try {
-      final response =
-          await supabase.from('cash').select('id, name, balance').order('name');
-      return response;
-    } catch (_) {
-      return [];
+  /// Rebuild the editable _orderItems list from the existing order_items,
+  /// resolving each line to the full product+variant object from `products`
+  /// so the picker & steppers work identically to the create flow.
+  void _seedItemsFromOrder(List products) {
+    final existing = (widget.order['order_items'] as List?) ?? [];
+
+    for (final raw in existing) {
+      final line = raw as Map;
+      final variantId = line['product_variant_id'] ??
+          (line['product_variants'] is Map
+              ? line['product_variants']['id']
+              : null);
+      final productId = line['product_id'] ??
+          (line['products'] is Map ? line['products']['id'] : null);
+
+      Map<String, dynamic>? product;
+      Map<String, dynamic>? variant;
+
+      // Resolve against the freshly loaded products list
+      for (final p in products) {
+        final pm = p as Map<String, dynamic>;
+        if (pm['id'] == productId) {
+          product = pm;
+          final variants = (pm['product_variants'] as List?) ?? [];
+          for (final v in variants) {
+            if ((v as Map)['id'] == variantId) {
+              variant = Map<String, dynamic>.from(v);
+              break;
+            }
+          }
+          break;
+        }
+      }
+
+      // Fallback: build minimal maps from the embedded joins if the product
+      // is no longer in the active list (e.g. deactivated).
+      product ??= line['products'] is Map
+          ? Map<String, dynamic>.from(line['products'] as Map)
+          : {'id': productId, 'name': '(unknown)'};
+      variant ??= line['product_variants'] is Map
+          ? Map<String, dynamic>.from(line['product_variants'] as Map)
+          : {'id': variantId, 'name': '-'};
+
+      final qty =
+          double.tryParse(line['quantity']?.toString() ?? '0') ?? 0;
+      final sellPrice =
+          double.tryParse(line['sell_price']?.toString() ?? '0') ?? 0;
+
+      _orderItems.add({
+        'product': product,
+        'variant': variant,
+        'qty': qty,
+        'sell_price': sellPrice,
+      });
     }
   }
 
@@ -87,6 +145,11 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   double _variantSellPrice(Map<String, dynamic>? variant) {
     if (variant == null) return 0;
     return double.tryParse(variant['sell_price']?.toString() ?? '0') ?? 0;
+  }
+
+  double _variantBuyPrice(Map<String, dynamic>? variant) {
+    if (variant == null) return 0;
+    return double.tryParse(variant['buy_price']?.toString() ?? '0') ?? 0;
   }
 
   // ── Helpers ───────────────────────────────────────────────
@@ -121,8 +184,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
         'product_id': product['id'],
         'variant_id': variant['id'],
         'qty': item['qty'] as double,
-        'buy_price':
-            double.tryParse(variant['buy_price']?.toString() ?? '0') ?? 0,
+        'buy_price': _variantBuyPrice(variant),
         'sell_price':
             double.tryParse(item['sell_price']?.toString() ?? '0') ?? 0,
       };
@@ -192,7 +254,6 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
               'product': product,
               'variant': variant,
               'qty': qty,
-              // seed editable sell_price from the variant
               'sell_price': _variantSellPrice(variant),
             });
           });
@@ -201,27 +262,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
     );
   }
 
-  void _selectCustomerSheet() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => CustomerPickerSheet(
-        customers: _customers,
-        onSelect: (c) => setState(() => _selectedCustomer = c),
-      ),
-    );
-  }
-
   Future<void> _submit() async {
-    if (_selectedCustomer == null) {
-      _snack('Please select a customer');
-      return;
-    }
-    if (_selectedCash == null) {
-      _snack('Please select a cash account');
-      return;
-    }
     if (_orderItems.isEmpty) {
       _snack('Add at least one product');
       return;
@@ -229,10 +270,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
     setState(() => _submitting = true);
     try {
-      final result = await SupabaseService.createOrder(
-        customerId: _selectedCustomer!['id'] as int,
-        status: _status,
-        cashId: _selectedCash!['id'] as int,
+      final result = await SupabaseService.editOrder(
+        orderId: _orderId,
         items: _buildItems(),
         deliveryPrice: _deliveryPrice,
         deliveryType: _deliveryType,
@@ -240,7 +279,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       );
 
       if (mounted) {
-        _snack('Order #${result['order_id']} created ✓', success: true);
+        _snack('Order #$_orderId updated ✓', success: true);
         Navigator.pop(context, result);
       }
     } catch (e) {
@@ -284,15 +323,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const SizedBox(height: 24),
-                          _buildCustomerSection(),
-                          const SizedBox(height: 20),
-                          _buildCashSection(),
-                          const SizedBox(height: 20),
                           _buildOrderDateSection(),
                           const SizedBox(height: 20),
                           _buildDeliverySection(),
-                          const SizedBox(height: 20),
-                          _buildStatusSection(),
                           const SizedBox(height: 20),
                           _buildItemsSection(),
                           const SizedBox(height: 20),
@@ -311,6 +344,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
 
   // ── Header ────────────────────────────────────────────────
   Widget _buildHeader() {
+    final customer = widget.order['customers'] as Map? ?? {};
+    final customerName = customer['name'] ?? 'Unknown';
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
       child: Row(
@@ -331,13 +367,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             ),
           ),
           const SizedBox(width: 16),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  "New Order",
-                  style: TextStyle(
+                  "Edit Order #$_orderId",
+                  style: const TextStyle(
                     color: Colors.white,
                     fontSize: 22,
                     fontWeight: FontWeight.w800,
@@ -345,9 +381,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                   ),
                 ),
                 Text(
-                  "Fill in the order details",
-                  style:
-                      TextStyle(color: Color(0xFF64748B), fontSize: 13),
+                  customerName,
+                  style: const TextStyle(
+                      color: Color(0xFF64748B), fontSize: 13),
                 ),
               ],
             ),
@@ -371,129 +407,6 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
         ),
       );
 
-  // ── Customer ──────────────────────────────────────────────
-  Widget _buildCustomerSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionLabel('CUSTOMER'),
-        GestureDetector(
-          onTap: _selectCustomerSheet,
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: const Color(0xFF161B27),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: _selectedCustomer != null
-                    ? const Color(0xFF6C63FF).withOpacity(0.4)
-                    : const Color(0xFF222840),
-                width: 1,
-              ),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1E1B4B),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(Icons.person_rounded,
-                      color: Color(0xFF6C63FF), size: 20),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _selectedCustomer == null
-                      ? const Text(
-                          'Select customer...',
-                          style: TextStyle(
-                              color: Color(0xFF4A5568), fontSize: 14),
-                        )
-                      : Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _selectedCustomer!['name'] ?? '-',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            if (_selectedCustomer!['phone'] != null)
-                              Text(
-                                _selectedCustomer!['phone'],
-                                style: const TextStyle(
-                                    color: Color(0xFF64748B),
-                                    fontSize: 12),
-                              ),
-                          ],
-                        ),
-                ),
-                const Icon(Icons.chevron_right_rounded,
-                    color: Color(0xFF2A3040), size: 22),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ── Cash ──────────────────────────────────────────────────
-  Widget _buildCashSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionLabel('CASH ACCOUNT'),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          decoration: BoxDecoration(
-            color: const Color(0xFF161B27),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFF222840), width: 1),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<Map<String, dynamic>>(
-              value: _selectedCash,
-              isExpanded: true,
-              dropdownColor: const Color(0xFF1E2333),
-              icon: const Icon(Icons.keyboard_arrow_down_rounded,
-                  color: Color(0xFF4A5568)),
-              style:
-                  const TextStyle(color: Colors.white, fontSize: 14),
-              hint: const Text('Select cash...',
-                  style: TextStyle(color: Color(0xFF4A5568))),
-              items:
-                  _cashes.map<DropdownMenuItem<Map<String, dynamic>>>((c) {
-                return DropdownMenuItem(
-                  value: c as Map<String, dynamic>,
-                  child: Row(
-                    children: [
-                      const Icon(Icons.account_balance_wallet_rounded,
-                          color: Color(0xFF10B981), size: 18),
-                      const SizedBox(width: 10),
-                      Text(c['name'] ?? '-'),
-                      const Spacer(),
-                      Text(
-                        'Rp ${_formatPrice(double.tryParse(c['balance']?.toString() ?? '0') ?? 0)}',
-                        style: const TextStyle(
-                            color: Color(0xFF64748B), fontSize: 12),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-              onChanged: (v) => setState(() => _selectedCash = v),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   // ── Order Date ────────────────────────────────────────────
   Widget _buildOrderDateSection() {
     return Column(
@@ -507,8 +420,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             decoration: BoxDecoration(
               color: const Color(0xFF161B27),
               borderRadius: BorderRadius.circular(14),
-              border:
-                  Border.all(color: const Color(0xFF222840), width: 1),
+              border: Border.all(color: const Color(0xFF222840), width: 1),
             ),
             child: Row(
               children: [
@@ -565,8 +477,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
           decoration: BoxDecoration(
             color: const Color(0xFF161B27),
             borderRadius: BorderRadius.circular(14),
-            border:
-                Border.all(color: const Color(0xFF222840), width: 1),
+            border: Border.all(color: const Color(0xFF222840), width: 1),
           ),
           child: Column(
             children: [
@@ -574,8 +485,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                 padding: const EdgeInsets.all(6),
                 child: Row(
                   children: [
-                    _deliveryToggle(
-                        'pickup', Icons.store_rounded, 'Pickup'),
+                    _deliveryToggle('pickup', Icons.store_rounded, 'Pickup'),
                     const SizedBox(width: 6),
                     _deliveryToggle('delivery',
                         Icons.delivery_dining_rounded, 'Delivery'),
@@ -606,15 +516,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                           decoration: const InputDecoration(
                             prefixText: 'Rp ',
                             prefixStyle: TextStyle(
-                                color: Color(0xFF64748B),
-                                fontSize: 13),
+                                color: Color(0xFF64748B), fontSize: 13),
                             border: InputBorder.none,
                             isDense: true,
                           ),
                           onChanged: (v) {
-                            setState(
-                                () => _deliveryPrice =
-                                    double.tryParse(v) ?? 0);
+                            setState(() =>
+                                _deliveryPrice = double.tryParse(v) ?? 0);
                           },
                         ),
                       ),
@@ -643,9 +551,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
-            color: active
-                ? const Color(0xFF1E1B4B)
-                : Colors.transparent,
+            color: active ? const Color(0xFF1E1B4B) : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
               color: active
@@ -669,83 +575,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                       ? const Color(0xFF6C63FF)
                       : const Color(0xFF4A5568),
                   fontSize: 13,
-                  fontWeight:
-                      active ? FontWeight.w700 : FontWeight.normal,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.normal,
                 ),
               ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  // ── Status ────────────────────────────────────────────────
-  Widget _buildStatusSection() {
-    const statuses = [
-      'pending',
-      'prepared',
-      'paid',
-      'picked up',
-      'delivered'
-    ];
-    const colors = {
-      'pending': Color(0xFFF59E0B),
-      'prepared': Color(0xFF6C63FF),
-      'paid': Color(0xFF10B981),
-      'picked up': Color(0xFF10B981),
-      'delivered': Color(0xFF10B981),
-    };
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionLabel('ORDER STATUS'),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          decoration: BoxDecoration(
-            color: const Color(0xFF161B27),
-            borderRadius: BorderRadius.circular(14),
-            border:
-                Border.all(color: const Color(0xFF222840), width: 1),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: _status,
-              isExpanded: true,
-              dropdownColor: const Color(0xFF1E2333),
-              icon: const Icon(Icons.keyboard_arrow_down_rounded,
-                  color: Color(0xFF4A5568)),
-              items: statuses.map((s) {
-                final color = colors[s] ?? const Color(0xFF94A3B8);
-                return DropdownMenuItem(
-                  value: s,
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                            color: color, shape: BoxShape.circle),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        s[0].toUpperCase() + s.substring(1),
-                        style: TextStyle(
-                            color: color,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-              onChanged: (v) =>
-                  setState(() => _status = v ?? 'pending'),
-            ),
-          ),
-        ),
-      ],
     );
   }
 
@@ -766,8 +602,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                   color: const Color(0xFF1E1B4B),
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                      color:
-                          const Color(0xFF6C63FF).withOpacity(0.3)),
+                      color: const Color(0xFF6C63FF).withOpacity(0.3)),
                 ),
                 child: const Row(
                   children: [
@@ -793,14 +628,12 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             decoration: BoxDecoration(
               color: const Color(0xFF161B27),
               borderRadius: BorderRadius.circular(14),
-              border:
-                  Border.all(color: const Color(0xFF222840), width: 1),
+              border: Border.all(color: const Color(0xFF222840), width: 1),
             ),
             child: const Center(
               child: Text(
                 'No items added yet',
-                style:
-                    TextStyle(color: Color(0xFF4A5568), fontSize: 13),
+                style: TextStyle(color: Color(0xFF4A5568), fontSize: 13),
               ),
             ),
           )
@@ -811,8 +644,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
             final variant = item['variant'] as Map<String, dynamic>;
             final qty = item['qty'] as double;
             final sellPrice =
-                double.tryParse(item['sell_price']?.toString() ?? '0') ??
-                    0;
+                double.tryParse(item['sell_price']?.toString() ?? '0') ?? 0;
             final subtotal = sellPrice * qty;
 
             final qtyCtrl = TextEditingController(
@@ -830,13 +662,12 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
               decoration: BoxDecoration(
                 color: const Color(0xFF161B27),
                 borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                    color: const Color(0xFF222840), width: 1),
+                border: Border.all(color: const Color(0xFF222840), width: 1),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── Product / variant name row ──────────
+                  // Product / variant name row
                   Row(
                     children: [
                       Container(
@@ -846,16 +677,13 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                           color: const Color(0xFF1E1B4B),
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: const Icon(
-                            Icons.inventory_2_rounded,
-                            color: Color(0xFF6C63FF),
-                            size: 20),
+                        child: const Icon(Icons.inventory_2_rounded,
+                            color: Color(0xFF6C63FF), size: 20),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
-                          crossAxisAlignment:
-                              CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
                               product['name'] ?? '-',
@@ -867,8 +695,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                             Text(
                               variant['name'] ?? '-',
                               style: const TextStyle(
-                                  color: Color(0xFF64748B),
-                                  fontSize: 12),
+                                  color: Color(0xFF64748B), fontSize: 12),
                             ),
                           ],
                         ),
@@ -880,10 +707,9 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                           width: 28,
                           height: 28,
                           decoration: BoxDecoration(
-                            color: const Color(0xFFEF4444)
-                                .withOpacity(0.1),
-                            borderRadius:
-                                BorderRadius.circular(8),
+                            color:
+                                const Color(0xFFEF4444).withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
                           ),
                           child: const Icon(Icons.close_rounded,
                               color: Color(0xFFEF4444), size: 14),
@@ -893,18 +719,15 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                   ),
                   const SizedBox(height: 12),
 
-                  // ── Qty stepper + sell price input ──────
+                  // Qty stepper + sell price input
                   Row(
                     children: [
-                      // Qty stepper
                       Row(
                         children: [
                           _qtyBtn(Icons.remove_rounded, () {
                             setState(() {
                               final newQty = double.parse(
-                                ((qty - 0.01) < 0.01
-                                        ? 0.01
-                                        : qty - 0.01)
+                                ((qty - 0.01) < 0.01 ? 0.01 : qty - 0.01)
                                     .toStringAsFixed(2),
                               );
                               if (qty <= 0.01) {
@@ -934,46 +757,41 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                               onChanged: (v) {
                                 final parsed = double.tryParse(v);
                                 if (parsed != null && parsed > 0) {
-                                  setState(() =>
-                                      _orderItems[i]['qty'] =
-                                          double.parse(parsed
-                                              .toStringAsFixed(2)));
+                                  setState(() => _orderItems[i]['qty'] =
+                                      double.parse(
+                                          parsed.toStringAsFixed(2)));
                                 }
                               },
                               onSubmitted: (v) {
                                 final parsed = double.tryParse(v);
                                 if (parsed == null || parsed <= 0) {
-                                  setState(() =>
-                                      _orderItems.removeAt(i));
+                                  setState(() => _orderItems.removeAt(i));
                                 }
                               },
                             ),
                           ),
                           _qtyBtn(Icons.add_rounded, () {
-                            setState(() =>
-                                _orderItems[i]['qty'] = double.parse(
+                            setState(() => _orderItems[i]['qty'] =
+                                double.parse(
                                     (qty + 0.01).toStringAsFixed(2)));
                           }),
                         ],
                       ),
                       const SizedBox(width: 12),
 
-                      // ── Sell price input ─────────────────
+                      // Sell price input
                       Expanded(
                         child: Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 12, vertical: 8),
                           decoration: BoxDecoration(
                             color: const Color(0xFF0F1117),
-                            borderRadius:
-                                BorderRadius.circular(10),
+                            borderRadius: BorderRadius.circular(10),
                             border: Border.all(
-                                color: const Color(0xFF222840),
-                                width: 1),
+                                color: const Color(0xFF222840), width: 1),
                           ),
                           child: Column(
-                            crossAxisAlignment:
-                                CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const Text(
                                 'Sell Price',
@@ -992,8 +810,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                                   Expanded(
                                     child: TextField(
                                       controller: priceCtrl,
-                                      keyboardType:
-                                          TextInputType.number,
+                                      keyboardType: TextInputType.number,
                                       inputFormatters: [
                                         FilteringTextInputFormatter
                                             .digitsOnly
@@ -1001,25 +818,19 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                                       style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 13),
-                                      decoration:
-                                          const InputDecoration(
+                                      decoration: const InputDecoration(
                                         hintText: '0',
                                         hintStyle: TextStyle(
-                                            color:
-                                                Color(0xFF2A3040),
+                                            color: Color(0xFF2A3040),
                                             fontSize: 13),
                                         border: InputBorder.none,
                                         isDense: true,
-                                        contentPadding:
-                                            EdgeInsets.zero,
+                                        contentPadding: EdgeInsets.zero,
                                       ),
                                       onChanged: (v) {
-                                        setState(() =>
-                                            _orderItems[i]
+                                        setState(() => _orderItems[i]
                                                 ['sell_price'] =
-                                                double.tryParse(
-                                                        v) ??
-                                                    0);
+                                            double.tryParse(v) ?? 0);
                                       },
                                     ),
                                   ),
@@ -1030,7 +841,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                         ),
                       ),
 
-                      // ── Subtotal ─────────────────────────
+                      // Subtotal
                       if (subtotal > 0) ...[
                         const SizedBox(width: 12),
                         Text(
@@ -1076,8 +887,8 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
       ),
       child: Column(
         children: [
-          _summaryRow('Items total',
-              'Rp ${_formatPrice(_itemsTotal)}', Colors.white),
+          _summaryRow('Items total', 'Rp ${_formatPrice(_itemsTotal)}',
+              Colors.white),
           if (_deliveryType == 'delivery') ...[
             const SizedBox(height: 8),
             _summaryRow('Delivery fee',
@@ -1110,8 +921,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                     ? const Color(0xFF94A3B8)
                     : const Color(0xFF64748B),
                 fontSize: bold ? 14 : 13,
-                fontWeight:
-                    bold ? FontWeight.w700 : FontWeight.normal,
+                fontWeight: bold ? FontWeight.w700 : FontWeight.normal,
               )),
           Text(value,
               style: TextStyle(
@@ -1154,7 +964,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
                         strokeWidth: 2.5, color: Colors.white),
                   )
                 : const Text(
-                    'Create Order',
+                    'Save Changes',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 16,

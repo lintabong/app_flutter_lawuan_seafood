@@ -14,6 +14,7 @@ import 'product_page.dart';
 import 'purchase_product.dart';
 import 'transaction_page.dart';
 import 'report_page.dart';
+import 'stock_opname_page.dart';
 
 import '../helpers/currency_utils.dart';
 
@@ -40,6 +41,7 @@ class _MainMenuState extends State<MainMenu> {
     {'title': 'Cash Out', 'icon': Icons.money_off_csred_rounded, 'color': Color(0xFFEF4444), 'bg': Color(0xFF2A0B0B)},
     {'title': 'Convert Variant', 'icon': Icons.inventory_rounded, 'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030)},
     {'title': 'Convert Product', 'icon': Icons.inventory_rounded, 'color': Color.fromARGB(255, 92, 246, 179), 'bg': Color(0xFF1C1030)},
+    {'title': 'Stock Opname', 'icon': Icons.inventory_rounded, 'color': Color.fromARGB(255, 199, 155, 73), 'bg': Color(0xFF1C1030)},
     {'title': 'Report', 'icon': Icons.bar_chart_rounded, 'color': Color(0xFF8B5CF6), 'bg': Color(0xFF1C1030)},
     {'title': 'Settings', 'icon': Icons.tune_rounded, 'color': Color(0xFF94A3B8), 'bg': Color(0xFF1A1F2E)},
   ];
@@ -51,7 +53,7 @@ class _MainMenuState extends State<MainMenu> {
 
     // Auto refresh tiap 8 detik (silent — tidak menampilkan spinner)
     _refreshTimer = Timer.periodic(
-      const Duration(seconds: 8),
+      const Duration(seconds: 150),
       (_) => _fetchDashboardData(silent: true),
     );
   }
@@ -287,6 +289,8 @@ class _MenuCardState extends State<_MenuCard> with SingleTickerProviderStateMixi
       Navigator.push(context, MaterialPageRoute(builder: (_) => ConvertProductPage()));
     } else if (title == 'Report') {
       Navigator.push(context, MaterialPageRoute(builder: (_) => ReportPage()));
+    } else if (title == 'Stock Opname') {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => StockOpnamePage()));
     }
   }
 
