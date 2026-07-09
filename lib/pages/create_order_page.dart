@@ -68,7 +68,7 @@ class _CreateOrderPageState extends State<CreateOrderPage> {
   Future<List<dynamic>> _getCashes() async {
     try {
       final response =
-          await supabase.from('cash').select('id, name, balance').order('name');
+          await supabase.from('cash').select('id, name, balance').order('id');
       return response;
     } catch (_) {
       return [];

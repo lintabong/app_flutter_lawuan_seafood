@@ -4,7 +4,9 @@ final supabase = Supabase.instance.client;
 
 class SupabaseService {
 
-  static String? get currentUserId => supabase.auth.currentUser?.id;
+  // static String? get currentUserId => supabase.auth.currentUser?.id;
+  static String? get currentUserId =>
+      supabase.auth.currentUser?.id ?? "ce0e6901-a941-4930-9916-b4f892f9225b";
 
   static Future<double> getCashBalance(int cashId) async {
     final res = await supabase
@@ -28,7 +30,7 @@ class SupabaseService {
   static Future<List<dynamic>> getProducts() async {
     final response = await supabase
         .from('products')
-        .select('*, product_variants(id, name, unit, buy_price, sell_price)')
+        .select('*, product_variants(id, name, unit, buy_price, sell_price, stock)')
         .eq('is_active', true)
         .order('name');
     return response;
@@ -605,10 +607,13 @@ class SupabaseService {
 
     double total = 0;
     for (final row in (res as List)) {
-      final stock =
-          double.tryParse(row['stock']?.toString() ?? '0') ?? 0;
-      final factor =
-          double.tryParse(row['conversion_factor']?.toString() ?? '1') ?? 1;
+      double stock = double.tryParse(row['stock']?.toString() ?? '0') ?? 0;
+
+      if (stock < 0) {
+        stock = 0;
+      }
+
+      final factor = double.tryParse(row['conversion_factor']?.toString() ?? '1') ?? 1;
       total += stock * factor;
     }
     return total;
@@ -795,5 +800,235 @@ static Future<Map<String, dynamic>> editOrder({
         .order('created_at', ascending: false)
         .limit(limit);
     return response;
+  }
+  /// Ringkasan stok per product = Σ(stock × conversion_factor) dari variant aktif.
+  /// Hanya product dengan total ≠ 0 yang dikembalikan (bukan alert, sekadar list).
+  static Future<List<Map<String, dynamic>>> getProductStockSummary() async {
+    final res = await supabase
+        .from('product_variants')
+        .select('stock, conversion_factor, products!inner(id, name, unit, is_active)')
+        .eq('is_active', true)
+        .eq('products.is_active', true);
+
+    final Map<int, Map<String, dynamic>> grouped = {};
+    for (final row in (res as List)) {
+      final product = row['products'] as Map<String, dynamic>;
+      final pid = (product['id'] as num).toInt();
+      final stock = double.tryParse(row['stock']?.toString() ?? '0') ?? 0;
+      final factor = double.tryParse(row['conversion_factor']?.toString() ?? '1') ?? 1;
+
+      grouped.putIfAbsent(pid, () => {
+            'id': pid,
+            'name': product['name'],
+            'unit': product['unit'] ?? 'kg',
+            'total_kg': 0.0,
+          });
+      grouped[pid]!['total_kg'] =
+          (grouped[pid]!['total_kg'] as double) + stock * factor;
+    }
+
+    final list = grouped.values
+        .where((p) => (p['total_kg'] as double) != 0)
+        .toList()
+      ..sort((a, b) =>
+          (b['total_kg'] as double).compareTo(a['total_kg'] as double));
+
+    return list;
+  }
+
+  static Future<void> signOut() async {
+    await supabase.auth.signOut();
+  }
+  // ── Suppliers CRUD ────────────────────────────────────────
+  static Future<void> insertSupplier(Map<String, dynamic> data) async {
+    await supabase.from('suppliers').insert(data);
+  }
+
+  static Future<void> updateSupplier(int id, Map<String, dynamic> data) async {
+    await supabase.from('suppliers').update(data).eq('id', id);
+  }
+
+  /// Soft delete — supplier bisa masih direferensi transaksi (FK),
+  /// jadi set is_active=false, bukan hard delete.
+  static Future<void> deleteSupplier(int id) async {
+    await supabase.from('suppliers').update({'is_active': false}).eq('id', id);
+  }
+
+  // ── Stock tracking (pending/prepared, paid, stock) ────────
+  static Future<List<dynamic>> getStockTracking() async {
+    final res = await supabase.rpc('report_stock_tracking');
+    return res as List;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+//  SHIPMENT / DRIVER — additions for lib/services/supabase_service.dart
+//  Copy every method below INTO the existing `class SupabaseService { ... }`.
+//  (They rely on the top-level `supabase` client and `currentUserId` getter
+//   that already exist in that file.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+  // ── Users (for the assign dropdown) ─────────────────────────────────────
+  static Future<List<dynamic>> getActiveUsers() async {
+    return await supabase
+        .from('users')
+        .select('id, name, role')
+        .eq('is_active', true)
+        .order('name');
+  }
+
+  // ── Assign / reassign ───────────────────────────────────────────────────
+  static Future<Map<String, dynamic>> assignShipment({
+    required int orderId,
+    required String driverId,
+  }) async {
+    final res = await supabase.rpc('assign_shipment', params: {
+      'p_order_id': orderId,
+      'p_driver_id': driverId,
+      'p_assigned_by': currentUserId,
+    });
+    if (res == null || (res as List).isEmpty) {
+      throw Exception('No response from assign_shipment');
+    }
+    return Map<String, dynamic>.from(res.first);
+  }
+
+  // ── Shipments for a set of orders (admin monitor) ───────────────────────
+  // Returns a map keyed by order_id -> shipment row (with driver name).
+  static Future<Map<int, Map<String, dynamic>>> getShipmentsByOrderIds(
+      List<int> orderIds) async {
+    if (orderIds.isEmpty) return {};
+    final res = await supabase
+        .from('shipments')
+        .select(
+            '*, driver:users!shipments_driver_id_fkey(id, name)')
+        .inFilter('order_id', orderIds);
+
+    final map = <int, Map<String, dynamic>>{};
+    for (final s in (res as List)) {
+      map[s['order_id'] as int] = Map<String, dynamic>.from(s);
+    }
+    return map;
+  }
+
+  // ── Shipments assigned to one driver on a date (driver task page) ───────
+  static Future<List<dynamic>> getMyShipments({
+    required String driverId,
+    required DateTime date,
+  }) async {
+    final start = DateTime(date.year, date.month, date.day).toUtc();
+    final end = DateTime(date.year, date.month, date.day, 23, 59, 59).toUtc();
+
+    return await supabase
+        .from('shipments')
+        .select('''
+          id, status, recipient_name, note, failure_reason,
+          assigned_at, started_at, arrived_at, completed_at, order_id,
+          orders!inner(
+            id, status, total_amount, delivery_price, delivery_type, order_date,
+            customers(id, name, phone, address, latitude, longitude),
+            order_items(
+              id, quantity, sell_price, is_prepared,
+              products(id, name, unit),
+              product_variants(id, name, unit)
+            )
+          )
+        ''')
+        .eq('driver_id', driverId)
+        .gte('orders.order_date', start.toIso8601String())
+        .lte('orders.order_date', end.toIso8601String())
+        .order('assigned_at', ascending: true);
+  }
+
+  // ── Shipment status transition (+ optional proof) ───────────────────────
+  static Future<Map<String, dynamic>> updateShipmentStatus({
+    required int shipmentId,
+    required String newStatus,
+    String? recipientName,
+    String? note,
+    String? failureReason,
+  }) async {
+    final res = await supabase.rpc('update_shipment_status', params: {
+      'p_shipment_id': shipmentId,
+      'p_new_status': newStatus,
+      'p_recipient_name': recipientName,
+      'p_note': note,
+      'p_failure_reason': failureReason,
+    });
+    if (res == null || (res as List).isEmpty) {
+      throw Exception('No response from update_shipment_status');
+    }
+    return Map<String, dynamic>.from(res.first);
+  }
+
+  // Flip every still-'assigned' shipment of this driver to 'en_route' at once.
+  // Called when the driver taps "Start live location".
+  static Future<void> startEnRouteForDriver(String driverId) async {
+    final now = DateTime.now().toUtc().toIso8601String();
+    await supabase
+        .from('shipments')
+        .update({'status': 'en_route', 'started_at': now, 'updated_at': now})
+        .eq('driver_id', driverId)
+        .eq('status', 'assigned');
+  }
+
+  // ── Driver live location ────────────────────────────────────────────────
+  static Future<void> updateDriverLocation({
+    required String driverId,
+    required double lat,
+    required double lng,
+    double? accuracy,
+    double? heading,
+    double? speed,
+  }) async {
+    await supabase.rpc('update_driver_location', params: {
+      'p_driver_id': driverId,
+      'p_lat': lat,
+      'p_lng': lng,
+      'p_accuracy': accuracy,
+      'p_heading': heading,
+      'p_speed': speed,
+    });
+  }
+
+  static Future<void> stopDriverLocation(String driverId) async {
+    await supabase
+        .from('driver_locations')
+        .update({
+          'is_sending': false,
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        })
+        .eq('driver_id', driverId);
+  }
+
+  // Latest position of every driver currently sharing (with driver name).
+  static Future<List<dynamic>> getDriverLocations() async {
+    return await supabase
+        .from('driver_locations')
+        .select(
+            '*, users!driver_locations_driver_id_fkey(id, name)')
+        .eq('is_sending', true)
+        .order('updated_at', ascending: false);
+  }
+
+  // ── Settings (generic key/value) ────────────────────────────────────────
+  static Future<String?> getSetting(String key) async {
+    final res = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', key)
+        .maybeSingle();
+    return res?['value'] as String?;
+  }
+
+  static Future<void> setSetting(String key, String value) async {
+    await supabase.from('app_settings').upsert({
+      'key': key,
+      'value': value,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
+
+  static Future<void> deleteShipment(int orderId) async {
+    await supabase.from('shipments').delete().eq('order_id', orderId);
   }
 }

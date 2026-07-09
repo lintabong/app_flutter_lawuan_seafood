@@ -1,13 +1,6 @@
 
 import 'package:flutter/material.dart';
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Shared pickers for create/edit order pages.
-//
-// Extracted from create_order_page.dart so both the Create and Edit flows
-// use the exact same product & customer selection UI.
-// ═══════════════════════════════════════════════════════════════════════════
-
 String _formatPrice(double price) {
   final str = price.toInt().toString();
   final buffer = StringBuffer();
@@ -18,9 +11,9 @@ String _formatPrice(double price) {
   return buffer.toString();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Product Picker Sheet
-// ═══════════════════════════════════════════════════════════════════════════
+String _formatStock(double v) =>
+    v % 1 == 0 ? v.toInt().toString() : v.toStringAsFixed(2);
+
 class ProductPickerSheet extends StatefulWidget {
   final List products;
   final void Function(
@@ -58,6 +51,24 @@ class _ProductPickerSheetState extends State<ProductPickerSheet> {
     final v = _selectedProduct!['product_variants'];
     if (v == null) return [];
     return List<Map<String, dynamic>>.from(v as List);
+  }
+
+  // ── Stock helpers ──────────────────────────────────────────────────────
+  double _variantStock(Map v) =>
+      double.tryParse(v['stock']?.toString() ?? '0') ?? 0;
+
+  /// Total stok produk = Σ(stock × conversion_factor) dari semua variant.
+  /// Setara kg, konsisten dengan getTotalStockKg di dashboard.
+  double _productStockKg(Map p) {
+    final vs = p['product_variants'];
+    if (vs == null) return 0;
+    double total = 0;
+    for (final v in (vs as List)) {
+      final s = double.tryParse(v['stock']?.toString() ?? '0') ?? 0;
+      final f = double.tryParse(v['conversion_factor']?.toString() ?? '1') ?? 1;
+      total += s * f;
+    }
+    return total;
   }
 
   @override
@@ -165,6 +176,8 @@ class _ProductPickerSheetState extends State<ProductPickerSheet> {
                       itemCount: _filtered.length,
                       itemBuilder: (_, i) {
                         final p = _filtered[i] as Map<String, dynamic>;
+                        final stockKg = _productStockKg(p);
+                        final empty = stockKg <= 0;
                         return GestureDetector(
                           onTap: () => setState(() {
                             _selectedProduct = p;
@@ -196,13 +209,44 @@ class _ProductPickerSheetState extends State<ProductPickerSheet> {
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
-                                  child: Text(
-                                    p['name'] ?? '-',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                    ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        p['name'] ?? '-',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            Icons.layers_rounded,
+                                            size: 11,
+                                            color: empty
+                                                ? const Color(0xFFEF4444)
+                                                : const Color(0xFF64748B),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            empty
+                                                ? 'Out of stock'
+                                                : 'Stock ${_formatStock(stockKg)} kg',
+                                            style: TextStyle(
+                                              color: empty
+                                                  ? const Color(0xFFEF4444)
+                                                  : const Color(0xFF64748B),
+                                              fontSize: 11.5,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
                                   ),
                                 ),
                                 const Icon(Icons.chevron_right_rounded,
@@ -236,12 +280,22 @@ class _ProductPickerSheetState extends State<ProductPickerSheet> {
               const Icon(Icons.arrow_back_rounded,
                   color: Color(0xFF6C63FF), size: 18),
               const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  _selectedProduct!['name'] ?? '-',
+                  style: const TextStyle(
+                      color: Color(0xFF6C63FF),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700),
+                ),
+              ),
+              // Total stok produk di header variant picker
               Text(
-                _selectedProduct!['name'] ?? '-',
+                'Total ${_formatStock(_productStockKg(_selectedProduct!))} kg',
                 style: const TextStyle(
-                    color: Color(0xFF6C63FF),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700),
+                    color: Color(0xFF64748B),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600),
               ),
             ],
           ),
@@ -260,6 +314,9 @@ class _ProductPickerSheetState extends State<ProductPickerSheet> {
           final selected = _selectedVariant?['id'] == v['id'];
           final price =
               double.tryParse(v['sell_price']?.toString() ?? '0') ?? 0;
+          final stock = _variantStock(v);
+          final unit = (v['unit'] ?? '').toString();
+          final empty = stock <= 0;
           return GestureDetector(
             onTap: () => setState(() => _selectedVariant = v),
             child: AnimatedContainer(
@@ -290,15 +347,45 @@ class _ProductPickerSheetState extends State<ProductPickerSheet> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: Text(
-                      v['name'] ?? '-',
-                      style: TextStyle(
-                        color: selected
-                            ? Colors.white
-                            : const Color(0xFF94A3B8),
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          v['name'] ?? '-',
+                          style: TextStyle(
+                            color: selected
+                                ? Colors.white
+                                : const Color(0xFF94A3B8),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.inventory_2_outlined,
+                              size: 11,
+                              color: empty
+                                  ? const Color(0xFFEF4444)
+                                  : const Color(0xFF64748B),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              empty
+                                  ? 'Out of stock'
+                                  : 'Stock ${_formatStock(stock)}${unit.isNotEmpty ? ' $unit' : ''}',
+                              style: TextStyle(
+                                color: empty
+                                    ? const Color(0xFFEF4444)
+                                    : const Color(0xFF64748B),
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                   Text(
